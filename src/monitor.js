@@ -1,0 +1,526 @@
+/**
+ * Florida Lottery YouTube Monitor
+ * Watches the official FL Lottery channel for new draw result videos,
+ * extracts frame screenshots, emails results AND notifies ballbot webhook.
+ *
+ * Channel: https://www.youtube.com/channel/UCPm7mcdzUK9PjQtdGX4_Niw
+ *
+ * BUG FIX 2026-03-24: FL Lottery changed title format from
+ *   "Florida Lottery — Pick 3 Midday Results" (OLD, never matched)
+ *   to "Pick Midday 20260323" / "Pick Evening 20260323" (CURRENT)
+ */
+
+const { exec } = require("child_process");
+const fs = require("fs");
+const path = require("path");
+const https = require("https");
+const http = require("http");
+const url = require("url");
+const { analyzeVideo, cleanupAnalysis } = require("./video-analyzer");
+
+// ─── Config ────────────────────────────────────────────────────────────────
+const CONFIG = require("../config/config.json");
+const STATE_FILE = path.join(__dirname, "../config/state.json");
+
+// ─── State Management ───────────────────────────────────────────────────────
+function loadState() {
+  if (!fs.existsSync(STATE_FILE)) return { processedVideos: [] };
+  try {
+    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+  } catch {
+    return { processedVideos: [] };
+  }
+}
+
+function saveState(state) {
+  // Atomic write via temp file to avoid corruption on power failure
+  const tmp = STATE_FILE + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
+  fs.renameSync(tmp, STATE_FILE);
+}
+
+// ─── YouTube RSS Feed (no API key needed) ──────────────────────────────────
+const CHANNEL_ID = "UCPm7mcdzUK9PjQtdGX4_Niw";
+const RSS_URL = `https://www.youtube.com/feeds/videos.xml?channel_id=${CHANNEL_ID}`;
+
+function fetchRSS(url) {
+  return new Promise((resolve, reject) => {
+    https
+      .get(url, (res) => {
+        let data = "";
+        res.on("data", (chunk) => (data += chunk));
+        res.on("end", () => resolve(data));
+      })
+      .on("error", reject);
+  });
+}
+
+function parseRSSVideos(xml) {
+  const videos = [];
+  const entryRegex = /<entry>([\s\S]*?)<\/entry>/g;
+  let match;
+
+  while ((match = entryRegex.exec(xml)) !== null) {
+    const entry = match[1];
+    const id = (entry.match(/yt:videoId>(.*?)<\/yt:videoId/) || [])[1];
+    const title = (entry.match(/<title>(.*?)<\/title>/) || [])[1] || "";
+    const published = (entry.match(/<published>(.*?)<\/published>/) || [])[1] || "";
+    const updated = (entry.match(/<updated>(.*?)<\/updated>/) || [])[1] || "";
+
+    if (id) {
+      videos.push({
+        id,
+        title: title.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">"),
+        url: `https://www.youtube.com/watch?v=${id}`,
+        published,
+        updated,
+      });
+    }
+  }
+
+  return videos;
+}
+
+// ─── Draw Classification ────────────────────────────────────────────────────
+// FL Lottery current title format (as of 2026): "Pick Midday 20260323", "Pick Evening 20260323"
+// Legacy format (2024 and before): "Florida Lottery — Pick 3 Midday Results — 03/24/2026"
+const DRAW_PATTERNS = [
+  // ── CURRENT FORMAT (2025+): one video covers Pick 3 + Pick 4 together ──
+  { regex: /^pick\s+mid/i,     type: "Pick Midday",   period: "m", emoji: "☀️" },
+  { regex: /^pick\s+eve/i,     type: "Pick Evening",  period: "e", emoji: "🌙" },
+  // ── LEGACY FORMAT (fallback — kept for historical / format changes) ──
+  { regex: /pick\s*3.*mid/i,   type: "Pick 3 Midday", period: "m", emoji: "☀️" },
+  { regex: /pick\s*3.*eve/i,   type: "Pick 3 Evening",period: "e", emoji: "🌙" },
+  { regex: /pick\s*4.*mid/i,   type: "Pick 4 Midday", period: "m", emoji: "☀️" },
+  { regex: /pick\s*4.*eve/i,   type: "Pick 4 Evening",period: "e", emoji: "🌙" },
+  { regex: /pick\s*3/i,        type: "Pick 3",        period: null, emoji: "🎱" },
+  { regex: /pick\s*4/i,        type: "Pick 4",        period: null, emoji: "🎱" },
+];
+
+const MONITORED_TYPES = CONFIG.monitored_draws || [
+  "Pick Midday",
+  "Pick Evening",
+  "Pick 3 Midday",
+  "Pick 3 Evening",
+  "Pick 4 Midday",
+  "Pick 4 Evening",
+];
+
+function classifyVideo(title) {
+  for (const pattern of DRAW_PATTERNS) {
+    if (pattern.regex.test(title)) {
+      return pattern;
+    }
+  }
+  return null;
+}
+
+function isMonitored(drawType) {
+  return MONITORED_TYPES.some((t) => drawType.startsWith(t) || drawType === t);
+}
+
+// ─── Ballbot Webhook Notification ──────────────────────────────────────────
+function httpPost(targetUrl, jsonBody) {
+  return new Promise((resolve, reject) => {
+    const parsed = new url.URL(targetUrl);
+    const isHttps = parsed.protocol === "https:";
+    const lib = isHttps ? https : http;
+    const bodyBuf = Buffer.from(jsonBody, "utf8");
+
+    const opts = {
+      hostname: parsed.hostname,
+      port: parsed.port || (isHttps ? 443 : 80),
+      path: parsed.pathname + (parsed.search || ""),
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": bodyBuf.length,
+      },
+      timeout: 15000,
+    };
+
+    const req = lib.request(opts, (res) => {
+      let data = "";
+      res.on("data", (c) => (data += c));
+      res.on("end", () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) resolve(data);
+        else reject(new Error(`HTTP ${res.statusCode}: ${data}`));
+      });
+    });
+
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("Request timeout")); });
+    req.write(bodyBuf);
+    req.end();
+  });
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Analyzes the video with AI and notifies Ballbot with extracted numbers.
+ * 
+ * Pipeline:
+ *   1. Download video & extract frames + audio (VideoAnalyzer)
+ *   2. Gemini Vision + Audio → cross-validated numbers
+ *   3. Send numbers directly to Ballbot webhook
+ * 
+ * ZERO PDF dependency. Numbers come from the video itself.
+ */
+async function notifyBallbot(draw, video) {
+  if (!CONFIG.webhook_url) {
+    log("⚠️  webhook_url no configurado — saltando integración ballbot");
+    return;
+  }
+
+  // ── Step 1: AI Video Analysis ─────────────────────────────────────────
+  let extractedNumbers = null;
+  try {
+    log(`🧠 Initiating AI video analysis for ${video.id}...`);
+    extractedNumbers = await analyzeVideo(video.url, video.id, video.title);
+    log(`🎯 AI extraction complete: P3=${extractedNumbers.p3 || "N/A"} P4=${extractedNumbers.p4 || "N/A"} [${extractedNumbers.confidence.toUpperCase()}]`);
+  } catch (e) {
+    log(`❌ Video analysis failed: ${e.message}`);
+    log(`⚠️  Sending webhook WITHOUT extracted numbers (Ballbot can use backup methods)`);
+  }
+
+  // ── Step 2: Build simple payload with JUST the numbers ───────────────
+  const payload = JSON.stringify({
+    period: draw.period,   // "m" | "e"
+    p3: extractedNumbers ? extractedNumbers.p3 : null,
+    p4: extractedNumbers ? extractedNumbers.p4 : null,
+    secret: CONFIG.webhook_secret || "",
+    detectedAt: new Date().toISOString(),
+  });
+
+  // ── Step 3: Send to Ballbot ──────────────────────────────────────────
+  const maxRetries = 3;
+  const retryDelay = 10000; // 10 seconds (no longer waiting for PDF — numbers are already extracted)
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const raw = await httpPost(CONFIG.webhook_url, payload);
+      const response = JSON.parse(raw);
+
+      log(`✅ Ballbot notificado: ${draw.type} → P3=${response.p3 || "-"} P4=${response.p4 || "-"} | ${response.usersNotified ?? 0} usuarios notificados [${extractedNumbers?.confidence || "no-ai"}]`);
+
+      // Cleanup video analysis artifacts after successful delivery
+      cleanupAnalysis(video.id);
+      return;
+
+    } catch (e) {
+      log(`❌ Webhook error (intento ${attempt}/${maxRetries}): ${e.message}`);
+      if (attempt < maxRetries) await sleep(retryDelay);
+    }
+  }
+
+  log(`⚠️ [ALERTA CEO] Agotados ${maxRetries} intentos webhook para ${draw.type}. Números extraídos: P3=${extractedNumbers?.p3 || "N/A"} P4=${extractedNumbers?.p4 || "N/A"}. Verificación manual requerida.`);
+}
+
+// ─── Frame Capture with yt-dlp + ffmpeg ────────────────────────────────────
+const CAPTURE_DIR = path.join(__dirname, "../captures");
+if (!fs.existsSync(CAPTURE_DIR)) fs.mkdirSync(CAPTURE_DIR, { recursive: true });
+
+function captureFrame(videoUrl, videoId) {
+  return new Promise((resolve, reject) => {
+    const outputPath = path.join(CAPTURE_DIR, `${videoId}_frame.jpg`);
+    const thumbnailPath = path.join(CAPTURE_DIR, `${videoId}_thumb.jpg`);
+
+    // Strategy 1: Use yt-dlp to get the best thumbnail (fast, always available)
+    const thumbCmd = `yt-dlp --write-thumbnail --skip-download --convert-thumbnails jpg -o "${path.join(CAPTURE_DIR, videoId)}" "${videoUrl}" 2>&1`;
+
+    log(`📸 Capturing frame for ${videoId}...`);
+
+    exec(thumbCmd, { timeout: 60000 }, (_err, _stdout) => {
+      // Check if thumbnail was saved with various possible extensions
+      const possibleFiles = [`${videoId}.jpg`, `${videoId}.webp`, `${videoId}.png`].map((f) =>
+        path.join(CAPTURE_DIR, f)
+      );
+
+      const existingThumb = possibleFiles.find((f) => fs.existsSync(f));
+
+      if (existingThumb) {
+        if (existingThumb !== thumbnailPath) {
+          fs.renameSync(existingThumb, thumbnailPath);
+        }
+        log(`✅ Thumbnail captured: ${thumbnailPath}`);
+        return resolve(thumbnailPath);
+      }
+
+      // Strategy 2: Try to grab a mid-video frame with ffmpeg
+      log(`⚠️  Thumbnail not found, trying ffmpeg frame extraction...`);
+      const ffmpegCmd = `yt-dlp -g "${videoUrl}" 2>/dev/null | head -1`;
+
+      exec(ffmpegCmd, { timeout: 30000 }, (err2, streamUrl) => {
+        if (err2 || !streamUrl.trim()) {
+          return reject(new Error("Could not get stream URL"));
+        }
+
+        const ffmpeg = `ffmpeg -i "${streamUrl.trim()}" -ss 00:00:03 -vframes 1 -q:v 2 "${outputPath}" -y 2>&1`;
+        exec(ffmpeg, { timeout: 60000 }, (err3) => {
+          if (err3 || !fs.existsSync(outputPath)) {
+            return reject(new Error("Frame extraction failed"));
+          }
+          log(`✅ Frame captured via ffmpeg: ${outputPath}`);
+          resolve(outputPath);
+        });
+      });
+    });
+  });
+}
+
+// ─── Captures Cleanup (7-day rotation) ─────────────────────────────────────
+function cleanOldCaptures() {
+  try {
+    const now = Date.now();
+    const maxAge = 7 * 24 * 60 * 60 * 1000; // 7 days
+    const files = fs.readdirSync(CAPTURE_DIR);
+    let removed = 0;
+    for (const file of files) {
+      const fp = path.join(CAPTURE_DIR, file);
+      const stat = fs.statSync(fp);
+      if (now - stat.mtimeMs > maxAge) {
+        fs.unlinkSync(fp);
+        removed++;
+      }
+    }
+    if (removed > 0) log(`🧹 Cleanup: ${removed} capturas antiguas eliminadas`);
+  } catch (e) {
+    log(`⚠️  Cleanup error: ${e.message}`);
+  }
+}
+
+// ─── Email via Nodemailer ───────────────────────────────────────────────────
+async function sendEmail(drawInfo, imagePath, videoUrl, videoTitle) {
+  const nodemailer = require("nodemailer");
+
+  const transporter = nodemailer.createTransport({
+    host: CONFIG.smtp.host,
+    port: CONFIG.smtp.port,
+    secure: CONFIG.smtp.secure,
+    auth: {
+      user: CONFIG.smtp.user,
+      pass: CONFIG.smtp.pass,
+    },
+  });
+
+  const now = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
+  const subject = `${drawInfo.emoji} ${drawInfo.type} Results — ${now}`;
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #0a0a0a; color: #f0f0f0; border-radius: 12px; overflow: hidden;">
+      <div style="background: linear-gradient(135deg, #1a1a2e, #16213e); padding: 24px; text-align: center;">
+        <h1 style="margin: 0; font-size: 28px; color: #ffd700;">${drawInfo.emoji} Florida Lottery</h1>
+        <p style="margin: 8px 0 0; color: #aaa; font-size: 14px;">${drawInfo.type} — Official Results</p>
+      </div>
+      <div style="padding: 24px;">
+        <p style="color: #ccc; font-size: 14px; margin: 0 0 16px;">
+          📺 Source: <a href="${videoUrl}" style="color: #4fc3f7;">${videoTitle}</a>
+        </p>
+        <p style="color: #888; font-size: 12px; margin: 0 0 20px;">Captured: ${now} ET</p>
+        ${imagePath ? `<img src="cid:capture" style="width: 100%; border-radius: 8px; border: 1px solid #333;" />` : ""}
+        <div style="margin-top: 20px; padding: 12px; background: #111; border-radius: 8px; border-left: 3px solid #ffd700;">
+          <p style="margin: 0; color: #888; font-size: 11px;">
+            This notification was generated automatically from the official Florida Lottery YouTube channel.
+            Always verify results at <a href="https://www.flalottery.com" style="color: #4fc3f7;">flalottery.com</a>.
+          </p>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const mailOptions = {
+    from: `"FL Lottery Monitor" <${CONFIG.smtp.user}>`,
+    to: CONFIG.recipients.join(", "),
+    subject,
+    html,
+    attachments: imagePath
+      ? [
+          {
+            filename: path.basename(imagePath),
+            path: imagePath,
+            cid: "capture",
+          },
+        ]
+      : [],
+  };
+
+  await transporter.sendMail(mailOptions);
+  log(`📧 Email sent: ${subject}`);
+}
+
+// ─── Logger ─────────────────────────────────────────────────────────────────
+function log(msg) {
+  const ts = new Date().toISOString();
+  const line = `[${ts}] ${msg}`;
+  console.log(line);
+
+  const logFile = path.join(__dirname, "../logs/monitor.log");
+  const logDir = path.dirname(logFile);
+  if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+  fs.appendFileSync(logFile, line + "\n");
+}
+
+// ─── Main Poll Loop ─────────────────────────────────────────────────────────
+async function poll() {
+  log("🔍 Polling Florida Lottery YouTube channel...");
+  const state = loadState();
+
+  try {
+    const xml = await fetchRSS(RSS_URL);
+    const videos = parseRSSVideos(xml);
+
+    log(`📋 Found ${videos.length} videos in feed`);
+
+    for (const video of videos) {
+      if (state.processedVideos.includes(video.id)) continue;
+
+      const draw = classifyVideo(video.title);
+      if (!draw) {
+        log(`⏭️  Skipping: "${video.title}" (not a draw video)`);
+        state.processedVideos.push(video.id);
+        continue;
+      }
+
+      if (!isMonitored(draw.type)) {
+        log(`⏭️  Skipping: "${video.title}" (${draw.type} not in monitored list)`);
+        state.processedVideos.push(video.id);
+        continue;
+      }
+
+      log(`🎯 NEW DRAW VIDEO: "${video.title}" → ${draw.type} [period=${draw.period}]`);
+
+      // ── Analyze video with AI + Notify Ballbot with extracted numbers ────
+      // Runs SYNCHRONOUSLY — we need the video analysis to complete before proceeding
+      // so the numbers are included in the webhook payload
+      if (draw.period) {
+        try {
+          await notifyBallbot(draw, video);
+        } catch (e) {
+          log(`❌ notifyBallbot error: ${e.message}`);
+        }
+      } else {
+        log(`⚠️  No period mapped for "${draw.type}" — ballbot webhook skipped`);
+      }
+
+      // ── Capture frame for email ──────────────────────────────────────────
+      let imagePath = null;
+      try {
+        imagePath = await captureFrame(video.url, video.id);
+      } catch (e) {
+        log(`⚠️  Frame capture failed: ${e.message} — sending email without image`);
+      }
+
+      // ── Send email notification ──────────────────────────────────────────
+      try {
+        if (CONFIG.smtp && CONFIG.smtp.user && CONFIG.smtp.user !== "TU_EMAIL@gmail.com") {
+          await sendEmail(draw, imagePath, video.url, video.title);
+        } else {
+          log(`📧 SMTP no configurado — email omitido`);
+        }
+      } catch (e) {
+        log(`❌ Email failed: ${e.message}`);
+      }
+
+      state.processedVideos.push(video.id);
+
+      // Keep state clean — only last 200 video IDs
+      if (state.processedVideos.length > 200) {
+        state.processedVideos = state.processedVideos.slice(-200);
+      }
+
+      saveState(state);
+    }
+  } catch (e) {
+    log(`❌ Poll error: ${e.message}`);
+  }
+}
+
+// ─── HTTP Status Server ─────────────────────────────────────────────────────
+function startStatusServer() {
+  const port = CONFIG.status_port || 3456;
+
+  http
+    .createServer((_req, res) => {
+      const state = loadState();
+      const logFile = path.join(__dirname, "../logs/monitor.log");
+      const recentLogs = fs.existsSync(logFile)
+        ? fs
+            .readFileSync(logFile, "utf8")
+            .split("\n")
+            .filter(Boolean)
+            .slice(-50)
+            .reverse()
+            .join("\n")
+        : "No logs yet";
+
+      const payload = {
+        status: "running",
+        monitored_draws: MONITORED_TYPES,
+        processed_count: state.processedVideos.length,
+        last_processed: state.processedVideos.slice(-5).reverse(),
+        channel: `https://www.youtube.com/channel/${CHANNEL_ID}`,
+        recent_logs: recentLogs,
+        uptime_seconds: Math.floor(process.uptime()),
+        webhook_configured: !!CONFIG.webhook_url,
+      };
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(payload, null, 2));
+    })
+    .listen(port, () => {
+      log(`🌐 Status server running on http://localhost:${port}`);
+    });
+}
+
+// ─── Smart Window Polling ───────────────────────────────────────────────────
+// Normal mode: every CONFIG.poll_interval_ms (default 120s)
+// Draw window: every 30s when close to expected YouTube upload time
+//   Midday window:  13:20–13:55 ET  (draw 13:30, video usually posted 13:35–13:45)
+//   Evening window: 21:40–22:05 ET  (draw 21:45, video usually posted 21:50–22:00)
+
+const WINDOW_INTERVAL_MS = 30_000; // 30 seconds
+
+function isInDrawWindow() {
+  const etStr = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
+  const et = new Date(etStr);
+  const totalMin = et.getHours() * 60 + et.getMinutes();
+  const middayWindow  = totalMin >= 13 * 60 + 30 && totalMin <= 13 * 60 + 55;
+  const eveningWindow = totalMin >= 21 * 60 + 45 && totalMin <= 22 * 60 + 5;
+  return middayWindow || eveningWindow;
+}
+
+/** Dynamic scheduler: switches between 30s (draw window) and normal interval. */
+function schedulePoll() {
+  const inWindow = isInDrawWindow();
+  const delay = inWindow ? WINDOW_INTERVAL_MS : CONFIG.poll_interval_ms;
+  if (inWindow) log(`⚡ DRAW WINDOW active — next poll in ${delay / 1000}s`);
+  setTimeout(async () => {
+    await poll();
+    schedulePoll(); // recursive — adapts delay on each iteration
+  }, delay);
+}
+
+// ─── Entry Point ────────────────────────────────────────────────────────────
+(async () => {
+  log("🚀 Florida Lottery Monitor starting...");
+  log(`📺 Channel: https://www.youtube.com/channel/${CHANNEL_ID}`);
+  log(`🎯 Monitoring: ${MONITORED_TYPES.join(", ")}`);
+  log(`📧 Recipients: ${(CONFIG.recipients || []).join(", ")}`);
+  log(`⏱️  Normal interval: ${CONFIG.poll_interval_ms / 1000}s | Window interval: ${WINDOW_INTERVAL_MS / 1000}s`);
+  log(`🔗 Ballbot webhook: ${CONFIG.webhook_url || "NOT CONFIGURED"}`);
+
+  startStatusServer();
+
+  // Cleanup old captures once at start
+  cleanOldCaptures();
+
+  // Run immediately on start, then use smart scheduler
+  await poll();
+  schedulePoll();
+
+  // Daily cleanup at midnight
+  setInterval(cleanOldCaptures, 24 * 60 * 60 * 1000);
+})();

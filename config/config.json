@@ -1,0 +1,26 @@
+{
+  "monitored_draws": [
+    "Pick Midday",
+    "Pick Evening",
+    "Pick 3 Midday",
+    "Pick 3 Evening",
+    "Pick 4 Midday",
+    "Pick 4 Evening"
+  ],
+  "recipients": [
+    "2ballbot@gmail.com"
+  ],
+  "poll_interval_ms": 120000,
+  "status_port": 3456,
+  "webhook_url": "",
+  "webhook_secret": "CHANGE_ME_STRONG_SECRET_32CHARS",
+  "webhook_retry_count": 3,
+  "webhook_retry_delay_ms": 300000,
+  "smtp": {
+    "host": "smtp.gmail.com",
+    "port": 587,
+    "secure": false,
+    "user": "TU_EMAIL@gmail.com",
+    "pass": "TU_APP_PASSWORD"
+  }
+}
