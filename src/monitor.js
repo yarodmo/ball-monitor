@@ -105,15 +105,15 @@ function parseRSSVideos(xml) {
 // Legacy format (2024 and before): "Florida Lottery — Pick 3 Midday Results — 03/24/2026"
 const DRAW_PATTERNS = [
   // ── CURRENT FORMAT (2025+): one video covers Pick 3 + Pick 4 together ──
-  { regex: /^pick\s+mid/i,     type: "Pick Midday",   period: "m", emoji: "☀️" },
-  { regex: /^pick\s+eve/i,     type: "Pick Evening",  period: "e", emoji: "🌙" },
+  { regex: /^pick\s+mid/i, type: "Pick Midday", period: "m", emoji: "☀️" },
+  { regex: /^pick\s+eve/i, type: "Pick Evening", period: "e", emoji: "🌙" },
   // ── LEGACY FORMAT (fallback — kept for historical / format changes) ──
-  { regex: /pick\s*3.*mid/i,   type: "Pick 3 Midday", period: "m", emoji: "☀️" },
-  { regex: /pick\s*3.*eve/i,   type: "Pick 3 Evening",period: "e", emoji: "🌙" },
-  { regex: /pick\s*4.*mid/i,   type: "Pick 4 Midday", period: "m", emoji: "☀️" },
-  { regex: /pick\s*4.*eve/i,   type: "Pick 4 Evening",period: "e", emoji: "🌙" },
-  { regex: /pick\s*3/i,        type: "Pick 3",        period: null, emoji: "🎱" },
-  { regex: /pick\s*4/i,        type: "Pick 4",        period: null, emoji: "🎱" },
+  { regex: /pick\s*3.*mid/i, type: "Pick 3 Midday", period: "m", emoji: "☀️" },
+  { regex: /pick\s*3.*eve/i, type: "Pick 3 Evening", period: "e", emoji: "🌙" },
+  { regex: /pick\s*4.*mid/i, type: "Pick 4 Midday", period: "m", emoji: "☀️" },
+  { regex: /pick\s*4.*eve/i, type: "Pick 4 Evening", period: "e", emoji: "🌙" },
+  { regex: /pick\s*3/i, type: "Pick 3", period: null, emoji: "🎱" },
+  { regex: /pick\s*4/i, type: "Pick 4", period: null, emoji: "🎱" },
 ];
 
 const MONITORED_TYPES = CONFIG.monitored_draws || [
@@ -287,7 +287,7 @@ async function notifyBallbot(draw, video) {
   } catch (e) {
     log(`⚠️  Cleanup failed: ${e.message}`);
   }
-  
+
   return extractedNumbers; // Return to be used by email service
 }
 
@@ -379,7 +379,7 @@ async function sendEmail(drawInfo, imagePath, videoUrl, videoTitle, extractedNum
   });
 
   const now = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
-  
+
   // Enriched Subject: [HIT] Emoji Type: P3 / P4
   const p3Str = extractedNumbers?.p3 || "??";
   const p4Str = extractedNumbers?.p4 || "????";
@@ -412,13 +412,12 @@ async function sendEmail(drawInfo, imagePath, videoUrl, videoTitle, extractedNum
         
         <div style="margin-top: 30px; padding: 15px; background: #0f172a; border-radius: 8px; border-left: 4px solid #38bdf8;">
           <p style="margin: 0; color: #64748b; font-size: 12px; line-height: 1.6;">
-            <strong>AUDITORÍA FORENSE:</strong> Este resultado ha sido triangulado mediante análisis de video y audio AI (Gemini 2.5 Flash). 
-            Sincronizado automáticamente con Ballbot Forensic Database.
+            <strong>AUDITORÍA VERIFICADA:</strong> Este resultado ha sido verificado y sincronizado automáticamente por Ballbot.
           </p>
         </div>
       </div>
       <div style="background: #000; padding: 15px; text-align: center; font-size: 11px; color: #444;">
-        &copy; 2026 CPD BLISS Ecosystem — hit.ballbot.tel
+        &copy; 2026 BallBot — hit.ballbot.tel
       </div>
     </div>
   `;
@@ -430,12 +429,12 @@ async function sendEmail(drawInfo, imagePath, videoUrl, videoTitle, extractedNum
     html,
     attachments: imagePath
       ? [
-          {
-            filename: path.basename(imagePath),
-            path: imagePath,
-            cid: "capture",
-          },
-        ]
+        {
+          filename: path.basename(imagePath),
+          path: imagePath,
+          cid: "capture",
+        },
+      ]
       : [],
   };
 
@@ -543,12 +542,12 @@ function startStatusServer() {
       const logFile = path.join(__dirname, "../logs/monitor.log");
       const recentLogs = fs.existsSync(logFile)
         ? fs
-            .readFileSync(logFile, "utf8")
-            .split("\n")
-            .filter(Boolean)
-            .slice(-50)
-            .reverse()
-            .join("\n")
+          .readFileSync(logFile, "utf8")
+          .split("\n")
+          .filter(Boolean)
+          .slice(-50)
+          .reverse()
+          .join("\n")
         : "No logs yet";
 
       const payload = {
@@ -582,7 +581,7 @@ function isInDrawWindow() {
   const etStr = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
   const et = new Date(etStr);
   const totalMin = et.getHours() * 60 + et.getMinutes();
-  const middayWindow  = totalMin >= 13 * 60 + 30 && totalMin <= 13 * 60 + 55;
+  const middayWindow = totalMin >= 13 * 60 + 30 && totalMin <= 13 * 60 + 55;
   const eveningWindow = totalMin >= 21 * 60 + 45 && totalMin <= 22 * 60 + 5;
   return middayWindow || eveningWindow;
 }
