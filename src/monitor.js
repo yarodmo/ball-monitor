@@ -18,8 +18,27 @@ const http = require("http");
 const url = require("url");
 const { analyzeVideo, cleanupAnalysis } = require("./video-analyzer");
 
-// ─── Config ────────────────────────────────────────────────────────────────
+// ─── Environment & Config ──────────────────────────────────────────────────
+require("dotenv").config();
 const CONFIG = require("../config/config.json");
+
+// Environment Overrides (Security First)
+if (process.env.GEMINI_API_KEY) CONFIG.gemini_api_key = process.env.GEMINI_API_KEY;
+if (process.env.DATABASE_URL) CONFIG.database_url = process.env.DATABASE_URL;
+if (process.env.WEBHOOK_URL) CONFIG.webhook_url = process.env.WEBHOOK_URL;
+if (process.env.WEBHOOK_SECRET) CONFIG.webhook_secret = process.env.WEBHOOK_SECRET;
+
+// SMTP Overrides
+if (process.env.SMTP_HOST) CONFIG.smtp.host = process.env.SMTP_HOST;
+if (process.env.SMTP_PORT) CONFIG.smtp.port = parseInt(process.env.SMTP_PORT);
+if (process.env.SMTP_USER) CONFIG.smtp.user = process.env.SMTP_USER;
+if (process.env.SMTP_PASS) CONFIG.smtp.pass = process.env.SMTP_PASS;
+if (process.env.SMTP_SECURE) CONFIG.smtp.secure = process.env.SMTP_SECURE === "true";
+
+// Other Overrides
+if (process.env.STATUS_PORT) CONFIG.status_port = parseInt(process.env.STATUS_PORT);
+if (process.env.RECIPIENTS) CONFIG.recipients = process.env.RECIPIENTS.split(",").map(e => e.trim());
+
 const STATE_FILE = path.join(__dirname, "../config/state.json");
 
 // ─── State Management ───────────────────────────────────────────────────────
