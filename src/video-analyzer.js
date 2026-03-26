@@ -23,7 +23,7 @@ const MAX_ANALYSES_TO_KEEP = 14; // 7 days * 2 sessions
 
 // ─── Dynamic Sampling ───────────────────────────────────────────────────────
 // Instead of hard-coded 18s/35s which vary, we scan the whole video.
-const SCAN_INTERVAL_SEC = 5;
+const SCAN_INTERVAL_SEC = 3; // 3s granularity for forensic veracity
 const VIDEO_DURATION_EST = 60; 
 
 // ─── Ensure Work Directory ──────────────────────────────────────────────────
@@ -261,6 +261,23 @@ function crossValidate(visionResults, audioResult) {
   return { p3: finalP3, p4: finalP4, confidence };
 }
 
+function findGoldFrame(frames, visionResults) {
+  // 1. Prefer the frame identified as "summary board"
+  const summaryIdx = visionResults.findIndex(r => r.is_summary);
+  if (summaryIdx !== -1) return frames[summaryIdx].path;
+
+  // 2. Fallback: Prefer a frame where both P3 and P4 were detected (likely results board)
+  const resultsIdx = visionResults.findIndex(r => r.p3 && r.p4);
+  if (resultsIdx !== -1) return frames[resultsIdx].path;
+
+  // 3. Last fallback: pick a frame around 36-45 seconds (sweet spot for results in 1min videos)
+  const sweetSpot = frames.find(f => f.sec >= 36 && f.sec <= 45);
+  if (sweetSpot) return sweetSpot.path;
+
+  // 4. Absolute fallback: the most recent frame
+  return frames[frames.length - 1]?.path;
+}
+
 // ─── Main Entry Point ───────────────────────────────────────────────────────
 async function analyzeVideo(videoUrl, videoId, videoTitle) {
   log(`🎬 PROCESANDO SORTEO: "${videoTitle}"`);
@@ -294,11 +311,12 @@ async function analyzeVideo(videoUrl, videoId, videoTitle) {
   }
 
   const validated = crossValidate(visionResults, audioResult);
+  const goldFrame = findGoldFrame(frames, visionResults);
 
   // Per user request: keep last 14, delete the rest
   cleanupOldAnalyses();
 
-  return { ...validated, source: "bliss_forensic_pipeline", folder: folderPath };
+  return { ...validated, source: "bliss_forensic_pipeline", folder: folderPath, goldFrame };
 }
 
 module.exports = { analyzeVideo, cleanupAnalysis: cleanupOldAnalyses };

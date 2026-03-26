@@ -58,9 +58,63 @@ function saveState(state) {
   fs.renameSync(tmp, STATE_FILE);
 }
 
-// ─── YouTube RSS Feed (no API key needed) ──────────────────────────────────
+// ─── YouTube Source Polling (Direct Scrape & RSS Fallback) ──────────────────
 const CHANNEL_ID = "UCPm7mcdzUK9PjQtdGX4_Niw";
+const CHANNEL_VIDEOS_URL = `https://www.youtube.com/@FloridaLottery/videos`;
 const RSS_URL = `https://www.youtube.com/feeds/videos.xml?channel_id=${CHANNEL_ID}`;
+
+/**
+ * Fetches latest videos by scraping the channel's /videos page.
+ * This is MUCH faster than RSS (near real-time).
+ */
+function fetchLatestVideosViaScrape() {
+  return new Promise((resolve, reject) => {
+    https.get(CHANNEL_VIDEOS_URL, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9'
+      }
+    }, (res) => {
+      let html = "";
+      res.on("data", (chunk) => (html += chunk));
+      res.on("end", () => {
+        try {
+          const match = html.match(/var ytInitialData = ({.*?});<\/script>/);
+          if (!match) return resolve([]);
+
+          const data = JSON.parse(match[1]);
+          const videos = [];
+          
+          // YouTube renders content in deep nested structures
+          const tabs = data.contents?.twoColumnBrowseResultsRenderer?.tabs;
+          if (!tabs) return resolve([]);
+
+          const videosTab = tabs.find(t => t.tabRenderer?.title === 'Videos' || t.tabRenderer?.endpoint?.browseEndpoint?.params?.includes('Egl2aWRlb3'));
+          const contents = videosTab?.tabRenderer?.content?.richGridRenderer?.contents || [];
+
+          for (const item of contents) {
+            const v = item.richItemRenderer?.content?.videoRenderer;
+            if (v && v.videoId) {
+              videos.push({
+                id: v.videoId,
+                title: v.title.runs[0].text,
+                url: `https://www.youtube.com/watch?v=${v.videoId}`,
+                published: v.publishedTimeText?.simpleText || 'Recently'
+              });
+            }
+          }
+          resolve(videos);
+        } catch (err) {
+          log(`⚠️ Scraping parse error: ${err.message}`);
+          resolve([]); // Fallback to RSS if scrape fails
+        }
+      });
+    }).on("error", (err) => {
+      log(`⚠️ Scraping fetch error: ${err.message}`);
+      resolve([]);
+    });
+  });
+}
 
 function fetchRSS(url) {
   return new Promise((resolve, reject) => {
@@ -281,14 +335,10 @@ async function notifyBallbot(draw, video) {
     }
   }
 
-  // Cleanup video analysis artifacts (non-critical)
-  try {
-    if (typeof cleanupAnalysis === "function") cleanupAnalysis(video.id);
-  } catch (e) {
-    log(`⚠️  Cleanup failed: ${e.message}`);
-  }
-
-  return extractedNumbers; // Return to be used by email service
+  // Cleanup is now managed by VideoAnalyzer's periodic rotation (last 14)
+  // to avoid deleting the goldFrame before the email is sent.
+  
+  return extractedNumbers; 
 }
 
 // ─── Frame Capture with yt-dlp + ffmpeg ────────────────────────────────────
@@ -455,15 +505,28 @@ function log(msg) {
 }
 
 // ─── Main Poll Loop ─────────────────────────────────────────────────────────
-async function poll() {
+async function pollChannel() {
   log("🔍 Polling Florida Lottery YouTube channel...");
-  const state = loadState();
 
   try {
-    const xml = await fetchRSS(RSS_URL);
-    const videos = parseRSSVideos(xml);
+    // 1. Try Direct Scrape First (Real-time)
+    let videos = await fetchLatestVideosViaScrape();
+    
+    // 2. If scrape failed or found nothing, fallback to RSS
+    if (videos.length === 0) {
+      log("ℹ️ Scrape found no videos, falling back to RSS...");
+      const xml = await fetchRSS(RSS_URL);
+      videos = parseRSSVideos(xml);
+    }
+
+    if (videos.length === 0) {
+      log("⚠️ No videos found in any source.");
+      return;
+    }
 
     log(`📋 Found ${videos.length} videos in feed`);
+    const state = loadState();
+    let foundAnyNew = false;
 
     for (const video of videos) {
       if (state.processedVideos.includes(video.id)) continue;
@@ -496,12 +559,17 @@ async function poll() {
           log(`❌ notifyBallbot error: ${e.message}`);
         }
 
-        // ── Step 2: Capture frame for email ────────────────────────────────
-        let imagePath = null;
-        try {
-          imagePath = await captureFrame(video.url, video.id);
-        } catch (e) {
-          log(`⚠️  Frame capture failed: ${e.message} — sending email without image`);
+        // ── Step 2: Capture frame for email (prefer forensic Gold Frame) ──
+        let imagePath = extractedNumbers?.goldFrame || null;
+        
+        if (!imagePath) {
+          try {
+            imagePath = await captureFrame(video.url, video.id);
+          } catch (e) {
+            log(`⚠️  Frame capture failed: ${e.message} — sending email without image`);
+          }
+        } else {
+          log(`🔎 Using Forensic Gold Frame: ${imagePath}`);
         }
 
         // ── Step 3: Send email notification ────────────────────────────────
@@ -571,18 +639,23 @@ function startStatusServer() {
 
 // ─── Smart Window Polling ───────────────────────────────────────────────────
 // Normal mode: every CONFIG.poll_interval_ms (default 120s)
-// Draw window: every 30s when close to expected YouTube upload time
-//   Midday window:  13:20–13:55 ET  (draw 13:30, video usually posted 13:35–13:45)
-//   Evening window: 21:40–22:05 ET  (draw 21:45, video usually posted 21:50–22:00)
+// Draw window: every 15s when close to expected YouTube upload time
+//   Midday window:  13:33–13:55 ET  (draw 13:30, video usually posted 13:35–13:45)
+//   Evening window: 21:48–22:05 ET  (draw 21:45, video usually posted 21:50–22:00)
 
-const WINDOW_INTERVAL_MS = 30_000; // 30 seconds
+const WINDOW_INTERVAL_MS = 15_000; // 15 seconds for Instant-Hit detection
 
 function isInDrawWindow() {
   const etStr = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
   const et = new Date(etStr);
   const totalMin = et.getHours() * 60 + et.getMinutes();
-  const middayWindow = totalMin >= 13 * 60 + 30 && totalMin <= 13 * 60 + 55;
-  const eveningWindow = totalMin >= 21 * 60 + 45 && totalMin <= 22 * 60 + 5;
+  
+  // Midday Window: Starts 13:33 (when videos drop) until 13:55
+  const middayWindow = totalMin >= 13 * 60 + 33 && totalMin <= 13 * 60 + 55;
+  
+  // Evening Window: Starts 21:48 (when videos drop) until 22:05
+  const eveningWindow = totalMin >= 21 * 60 + 48 && totalMin <= 22 * 60 + 5;
+  
   return middayWindow || eveningWindow;
 }
 
@@ -592,7 +665,7 @@ function schedulePoll() {
   const delay = inWindow ? WINDOW_INTERVAL_MS : CONFIG.poll_interval_ms;
   if (inWindow) log(`⚡ DRAW WINDOW active — next poll in ${delay / 1000}s`);
   setTimeout(async () => {
-    await poll();
+    await pollChannel();
     schedulePoll(); // recursive — adapts delay on each iteration
   }, delay);
 }
@@ -612,7 +685,7 @@ function schedulePoll() {
   cleanOldCaptures();
 
   // Run immediately on start, then use smart scheduler
-  await poll();
+  await pollChannel();
   schedulePoll();
 
   // Daily cleanup at midnight
