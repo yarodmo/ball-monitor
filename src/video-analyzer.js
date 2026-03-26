@@ -301,4 +301,4 @@ async function analyzeVideo(videoUrl, videoId, videoTitle) {
   return { ...validated, source: "bliss_forensic_pipeline", folder: folderPath };
 }
 
-module.exports = { analyzeVideo, cleanupOldAnalyses };
+module.exports = { analyzeVideo, cleanupAnalysis: cleanupOldAnalyses };

@@ -281,8 +281,12 @@ async function notifyBallbot(draw, video) {
     }
   }
 
-  // Cleanup video analysis artifacts
-  cleanupAnalysis(video.id);
+  // Cleanup video analysis artifacts (non-critical)
+  try {
+    if (typeof cleanupAnalysis === "function") cleanupAnalysis(video.id);
+  } catch (e) {
+    log(`⚠️  Cleanup failed: ${e.message}`);
+  }
   
   return extractedNumbers; // Return to be used by email service
 }
