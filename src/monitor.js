@@ -264,6 +264,8 @@ async function notifyBallbot(draw, video) {
 
   // Cleanup video analysis artifacts
   cleanupAnalysis(video.id);
+  
+  return extractedNumbers; // Return to be used by email service
 }
 
 // ─── Frame Capture with yt-dlp + ffmpeg ────────────────────────────────────
@@ -340,7 +342,7 @@ function cleanOldCaptures() {
 }
 
 // ─── Email via Nodemailer ───────────────────────────────────────────────────
-async function sendEmail(drawInfo, imagePath, videoUrl, videoTitle) {
+async function sendEmail(drawInfo, imagePath, videoUrl, videoTitle, extractedNumbers) {
   const nodemailer = require("nodemailer");
 
   const transporter = nodemailer.createTransport({
@@ -354,32 +356,52 @@ async function sendEmail(drawInfo, imagePath, videoUrl, videoTitle) {
   });
 
   const now = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
-  const subject = `${drawInfo.emoji} ${drawInfo.type} Results — ${now}`;
+  
+  // Enriched Subject: [HIT] Emoji Type: P3 / P4
+  const p3Str = extractedNumbers?.p3 || "??";
+  const p4Str = extractedNumbers?.p4 || "????";
+  const subject = `[HIT] ${drawInfo.emoji} ${drawInfo.type}: ${p3Str} / ${p4Str} — ${now}`;
 
   const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #0a0a0a; color: #f0f0f0; border-radius: 12px; overflow: hidden;">
-      <div style="background: linear-gradient(135deg, #1a1a2e, #16213e); padding: 24px; text-align: center;">
-        <h1 style="margin: 0; font-size: 28px; color: #ffd700;">${drawInfo.emoji} Florida Lottery</h1>
-        <p style="margin: 8px 0 0; color: #aaa; font-size: 14px;">${drawInfo.type} — Official Results</p>
+    <div style="font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #050505; color: #ffffff; border-radius: 16px; overflow: hidden; border: 1px solid #222;">
+      <div style="background: linear-gradient(135deg, #0f172a, #1e293b); padding: 30px; text-align: center; border-bottom: 2px solid #ffd700;">
+        <h1 style="margin: 0; font-size: 32px; color: #ffd700; letter-spacing: 2px;">${drawInfo.emoji} BALLBOT HIT</h1>
+        <p style="margin: 10px 0 0; color: #94a3b8; font-size: 16px; font-weight: 600; text-transform: uppercase;">${drawInfo.type} OFICIAL</p>
       </div>
-      <div style="padding: 24px;">
-        <p style="color: #ccc; font-size: 14px; margin: 0 0 16px;">
-          📺 Source: <a href="${videoUrl}" style="color: #4fc3f7;">${videoTitle}</a>
+      
+      <div style="padding: 30px; text-align: center;">
+        <div style="display: flex; justify-content: center; gap: 20px; margin-bottom: 30px;">
+          <div style="background: #111; padding: 20px; border-radius: 12px; border: 1px solid #333; min-width: 120px;">
+            <div style="color: #64748b; font-size: 12px; text-transform: uppercase; margin-bottom: 5px;">Pick 3</div>
+            <div style="color: #ffd700; font-size: 36px; font-weight: bold;">${p3Str}</div>
+          </div>
+          <div style="background: #111; padding: 20px; border-radius: 12px; border: 1px solid #333; min-width: 120px;">
+            <div style="color: #64748b; font-size: 12px; text-transform: uppercase; margin-bottom: 5px;">Pick 4</div>
+            <div style="color: #ffd700; font-size: 36px; font-weight: bold;">${p4Str}</div>
+          </div>
+        </div>
+
+        <p style="color: #94a3b8; font-size: 14px; margin-bottom: 20px;">
+          📺 Fuente: <a href="${videoUrl}" style="color: #38bdf8; text-decoration: none;">${videoTitle}</a>
         </p>
-        <p style="color: #888; font-size: 12px; margin: 0 0 20px;">Captured: ${now} ET</p>
-        ${imagePath ? `<img src="cid:capture" style="width: 100%; border-radius: 8px; border: 1px solid #333;" />` : ""}
-        <div style="margin-top: 20px; padding: 12px; background: #111; border-radius: 8px; border-left: 3px solid #ffd700;">
-          <p style="margin: 0; color: #888; font-size: 11px;">
-            This notification was generated automatically from the official Florida Lottery YouTube channel.
-            Always verify results at <a href="https://www.flalottery.com" style="color: #4fc3f7;">flalottery.com</a>.
+        
+        ${imagePath ? `<div style="margin-top: 10px;"><img src="cid:capture" style="width: 100%; border-radius: 12px; border: 1px solid #444;" /></div>` : ""}
+        
+        <div style="margin-top: 30px; padding: 15px; background: #0f172a; border-radius: 8px; border-left: 4px solid #38bdf8;">
+          <p style="margin: 0; color: #64748b; font-size: 12px; line-height: 1.6;">
+            <strong>AUDITORÍA FORENSE:</strong> Este resultado ha sido triangulado mediante análisis de video y audio AI (Gemini 2.5 Flash). 
+            Sincronizado automáticamente con Ballbot Forensic Database.
           </p>
         </div>
+      </div>
+      <div style="background: #000; padding: 15px; text-align: center; font-size: 11px; color: #444;">
+        &copy; 2026 CPD BLISS Ecosystem — hit.ballbot.tel
       </div>
     </div>
   `;
 
   const mailOptions = {
-    from: `"FL Lottery Monitor" <${CONFIG.smtp.user}>`,
+    from: `"Ballbot HIT" <${CONFIG.smtp.user}>`,
     to: CONFIG.recipients.join(", "),
     subject,
     html,
@@ -395,7 +417,7 @@ async function sendEmail(drawInfo, imagePath, videoUrl, videoTitle) {
   };
 
   await transporter.sendMail(mailOptions);
-  log(`📧 Email sent: ${subject}`);
+  log(`📧 Email enviado con resultados: ${subject}`);
 }
 
 // ─── Logger ─────────────────────────────────────────────────────────────────
@@ -443,32 +465,35 @@ async function poll() {
       // Runs SYNCHRONOUSLY — we need the video analysis to complete before proceeding
       // so the numbers are included in the webhook payload
       if (draw.period) {
+        let extractedNumbers = null;
         try {
-          await notifyBallbot(draw, video);
+          // ── Step 1: AI Video Analysis & Ballbot Notification ─────────────
+          // notifyBallbot performs the AI analysis and sends the Webhook
+          extractedNumbers = await notifyBallbot(draw, video);
         } catch (e) {
           log(`❌ notifyBallbot error: ${e.message}`);
         }
-      } else {
-        log(`⚠️  No period mapped for "${draw.type}" — ballbot webhook skipped`);
-      }
 
-      // ── Capture frame for email ──────────────────────────────────────────
-      let imagePath = null;
-      try {
-        imagePath = await captureFrame(video.url, video.id);
-      } catch (e) {
-        log(`⚠️  Frame capture failed: ${e.message} — sending email without image`);
-      }
-
-      // ── Send email notification ──────────────────────────────────────────
-      try {
-        if (CONFIG.smtp && CONFIG.smtp.user && CONFIG.smtp.user !== "TU_EMAIL@gmail.com") {
-          await sendEmail(draw, imagePath, video.url, video.title);
-        } else {
-          log(`📧 SMTP no configurado — email omitido`);
+        // ── Step 2: Capture frame for email ────────────────────────────────
+        let imagePath = null;
+        try {
+          imagePath = await captureFrame(video.url, video.id);
+        } catch (e) {
+          log(`⚠️  Frame capture failed: ${e.message} — sending email without image`);
         }
-      } catch (e) {
-        log(`❌ Email failed: ${e.message}`);
+
+        // ── Step 3: Send email notification ────────────────────────────────
+        try {
+          if (CONFIG.smtp && CONFIG.smtp.user && CONFIG.smtp.user !== "TU_EMAIL@gmail.com") {
+            await sendEmail(draw, imagePath, video.url, video.title, extractedNumbers);
+          } else {
+            log(`📧 SMTP no configurado — email omitido`);
+          }
+        } catch (e) {
+          log(`❌ Email failed: ${e.message}`);
+        }
+      } else {
+        log(`⚠️  No period mapped for "${draw.type}" — notifications skipped`);
       }
 
       state.processedVideos.push(video.id);
