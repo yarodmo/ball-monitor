@@ -166,7 +166,7 @@ RESPOND ONLY IN JSON:
     generationConfig: { temperature: 0.1, maxOutputTokens: 100 }
   };
 
-  const url = `${GEMINI_BASE}/models/gemini-2.0-flash:generateContent?key=${key}`;
+  const url = `${GEMINI_BASE}/models/gemini-2.5-flash:generateContent?key=${key}`;
   const response = await geminiPost(url, body);
   return parseGeminiNumbers(response, context);
 }
@@ -182,7 +182,7 @@ Output JSON: {"p3": "XXX", "p4": "XXXX"}`;
     generationConfig: { temperature: 0.1 }
   };
 
-  const url = `${GEMINI_BASE}/models/gemini-2.0-flash:generateContent?key=${key}`;
+  const url = `${GEMINI_BASE}/models/gemini-2.5-flash:generateContent?key=${key}`;
   const response = await geminiPost(url, body);
   return parseGeminiNumbers(response, "audio");
 }
@@ -279,12 +279,18 @@ async function analyzeVideo(videoUrl, videoId, videoTitle) {
     try {
       const res = await analyzeFrameWithGemini(f.path, f.label);
       visionResults.push(res);
-    } catch (e) {}
+    } catch (e) {
+      log(`⚠️ Gemini Vision error on ${f.label}: ${e.message}`);
+    }
   }
 
   let audioResult = { p3: null, p4: null };
   if (audioPath) {
-    try { audioResult = await analyzeAudioWithGemini(audioPath); } catch (e) {}
+    try { 
+      audioResult = await analyzeAudioWithGemini(audioPath); 
+    } catch (e) {
+      log(`⚠️ Gemini Audio error: ${e.message}`);
+    }
   }
 
   const validated = crossValidate(visionResults, audioResult);

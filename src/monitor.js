@@ -169,11 +169,43 @@ function sleep(ms) {
  * 
  * ZERO PDF dependency. Numbers come from the video itself.
  */
+/**
+ * Formats YYYYMMDD from title to MM/DD/YY for Postgres "date" column.
+ */
+function formatDrawDate(title) {
+  const match = title.match(/(\d{4})(\d{2})(\d{2})/);
+  if (match) {
+    const [_, yyyy, mm, dd] = match;
+    return `${mm}/${dd}/${yyyy.slice(-2)}`;
+  }
+  // Fallback to current date ET
+  const etStr = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
+  const et = new Date(etStr);
+  const mm = String(et.getMonth() + 1).padStart(2, "0");
+  const dd = String(et.getDate()).padStart(2, "0");
+  const yy = String(et.getFullYear()).slice(-2);
+  return `${mm}/${dd}/${yy}`;
+}
+
+/**
+ * Formats "774" to "7,7,4" for Postgres "numbers" column.
+ */
+function formatNumbers(str) {
+  if (!str) return "";
+  return str.split("").join(",");
+}
+
+/**
+ * Analyzes the video with AI and notifies Ballbot with extracted numbers.
+ * Sends two separate requests (P3 and P4) to match the Postgres row structure.
+ */
 async function notifyBallbot(draw, video) {
   if (!CONFIG.webhook_url) {
     log("⚠️  webhook_url no configurado — saltando integración ballbot");
     return;
   }
+
+  const drawDate = formatDrawDate(video.title);
 
   // ── Step 1: AI Video Analysis ─────────────────────────────────────────
   let extractedNumbers = null;
@@ -183,40 +215,55 @@ async function notifyBallbot(draw, video) {
     log(`🎯 AI extraction complete: P3=${extractedNumbers.p3 || "N/A"} P4=${extractedNumbers.p4 || "N/A"} [${extractedNumbers.confidence.toUpperCase()}]`);
   } catch (e) {
     log(`❌ Video analysis failed: ${e.message}`);
-    log(`⚠️  Sending webhook WITHOUT extracted numbers (Ballbot can use backup methods)`);
+    log(`⚠️  Cannot proceed with identical Postgres mapping without numbers.`);
+    return;
   }
 
-  // ── Step 2: Build simple payload with JUST the numbers ───────────────
-  const payload = JSON.stringify({
-    period: draw.period,   // "m" | "e"
-    p3: extractedNumbers ? extractedNumbers.p3 : null,
-    p4: extractedNumbers ? extractedNumbers.p4 : null,
-    secret: CONFIG.webhook_secret || "",
-    detectedAt: new Date().toISOString(),
-  });
+  // ── Step 2: Prepare specific payloads for P3 and P4 ──────────────────
+  const gamesToNotify = [];
+  if (extractedNumbers.p3) {
+    gamesToNotify.push({
+      date: drawDate,
+      game: "p3",
+      period: draw.period,
+      numbers: formatNumbers(extractedNumbers.p3),
+      secret: CONFIG.webhook_secret || "",
+    });
+  }
+  if (extractedNumbers.p4) {
+    gamesToNotify.push({
+      date: drawDate,
+      game: "p4",
+      period: draw.period,
+      numbers: formatNumbers(extractedNumbers.p4),
+      secret: CONFIG.webhook_secret || "",
+    });
+  }
 
-  // ── Step 3: Send to Ballbot ──────────────────────────────────────────
-  const maxRetries = 3;
-  const retryDelay = 10000; // 10 seconds (no longer waiting for PDF — numbers are already extracted)
+  // ── Step 3: Send separate calls (Relentless Retry) ───────────────────
+  for (const payloadItem of gamesToNotify) {
+    const payload = JSON.stringify(payloadItem);
+    const maxRetries = 3;
+    const retryDelay = 10000;
 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const raw = await httpPost(CONFIG.webhook_url, payload);
-      const response = JSON.parse(raw);
-
-      log(`✅ Ballbot notificado: ${draw.type} → P3=${response.p3 || "-"} P4=${response.p4 || "-"} | ${response.usersNotified ?? 0} usuarios notificados [${extractedNumbers?.confidence || "no-ai"}]`);
-
-      // Cleanup video analysis artifacts after successful delivery
-      cleanupAnalysis(video.id);
-      return;
-
-    } catch (e) {
-      log(`❌ Webhook error (intento ${attempt}/${maxRetries}): ${e.message}`);
-      if (attempt < maxRetries) await sleep(retryDelay);
+    let success = false;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        log(`📡 Sending [${payloadItem.game.toUpperCase()}] to Ballbot...`);
+        const raw = await httpPost(CONFIG.webhook_url, payload);
+        const response = JSON.parse(raw);
+        log(`✅ Ballbot notificado [${payloadItem.game.toUpperCase()}]: ${response.message || "OK"}`);
+        success = true;
+        break;
+      } catch (e) {
+        log(`❌ Webhook error [${payloadItem.game.toUpperCase()}] (intento ${attempt}/${maxRetries}): ${e.message}`);
+        if (attempt < maxRetries) await sleep(retryDelay);
+      }
     }
   }
 
-  log(`⚠️ [ALERTA CEO] Agotados ${maxRetries} intentos webhook para ${draw.type}. Números extraídos: P3=${extractedNumbers?.p3 || "N/A"} P4=${extractedNumbers?.p4 || "N/A"}. Verificación manual requerida.`);
+  // Cleanup video analysis artifacts
+  cleanupAnalysis(video.id);
 }
 
 // ─── Frame Capture with yt-dlp + ffmpeg ────────────────────────────────────
