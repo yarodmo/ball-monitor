@@ -3,3 +3,4 @@ node_modules/
 captures/
 logs/
 .DS_Store
+config/state.json
