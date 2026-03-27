@@ -671,23 +671,26 @@ function schedulePoll() {
 }
 
 // ─── Entry Point ────────────────────────────────────────────────────────────
-(async () => {
-  log("🚀 Florida Lottery Monitor starting...");
-  log(`📺 Channel: https://www.youtube.com/channel/${CHANNEL_ID}`);
-  log(`🎯 Monitoring: ${MONITORED_TYPES.join(", ")}`);
-  log(`📧 Recipients: ${(CONFIG.recipients || []).join(", ")}`);
-  log(`⏱️  Normal interval: ${CONFIG.poll_interval_ms / 1000}s | Window interval: ${WINDOW_INTERVAL_MS / 1000}s`);
-  log(`🔗 Ballbot webhook: ${CONFIG.webhook_url || "NOT CONFIGURED"}`);
+if (require.main === module) {
+  (async () => {
+    log("🚀 Florida Lottery Monitor starting...");
+    log(`📺 Channel: https://www.youtube.com/channel/${CHANNEL_ID}`);
+    log(`🎯 Monitoring: ${MONITORED_TYPES.join(", ")}`);
+    log(`📧 Recipients: ${(CONFIG.recipients || []).join(", ")}`);
+    log(`⏱️  Normal interval: ${CONFIG.poll_interval_ms / 1000}s | Window interval: ${WINDOW_INTERVAL_MS / 1000}s`);
+    log(`🔗 Ballbot webhook: ${CONFIG.webhook_url || "NOT CONFIGURED"}`);
 
-  startStatusServer();
+    startStatusServer();
 
-  // Cleanup old captures once at start
-  cleanOldCaptures();
+    // Cleanup old captures once at start
+    cleanOldCaptures();
 
-  // Run immediately on start, then use smart scheduler
-  await pollChannel();
-  schedulePoll();
+    // Run immediately on start, then use smart scheduler
+    await pollChannel();
+    schedulePoll();
 
-  // Daily cleanup at midnight
-  setInterval(cleanOldCaptures, 24 * 60 * 60 * 1000);
-})();
+    // Daily cleanup at midnight
+    setInterval(cleanOldCaptures, 24 * 60 * 60 * 1000);
+  })();
+}
+module.exports = { fetchLatestVideosViaScrape };

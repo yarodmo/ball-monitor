@@ -10,7 +10,7 @@
   "recipients": [],
   "poll_interval_ms": 120000,
   "status_port": 3456,
-  "webhook_url": "",
+  "webhook_url": "https://power-ball-dev.onrender.com/hit",
   "webhook_secret": "",
   "webhook_retry_count": 3,
   "webhook_retry_delay_ms": 300000,
