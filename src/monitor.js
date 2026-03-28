@@ -545,6 +545,8 @@ async function pollChannel() {
       }
 
       log(`🎯 NEW DRAW VIDEO: "${video.title}" → ${draw.type} [period=${draw.period}]`);
+      lastSuccessfulSnipeTime = Date.now(); // 💥 SNIPER KILL-SWITCH ACTIVADO
+      log(`🛑 Kill-Switch activado: Misión completada, abortando sondeo agresivo.`);
 
       // ── Analyze video with AI + Notify Ballbot with extracted numbers ────
       // Runs SYNCHRONOUSLY — we need the video analysis to complete before proceeding
@@ -644,6 +646,8 @@ function startStatusServer() {
 //   Evening window: 21:48–22:05 ET  (draw 21:45, video usually posted 21:50–22:00)
 
 const WINDOW_INTERVAL_MS = 15_000; // 15 seconds for Instant-Hit detection
+const SNIPE_COOLDOWN_MS = 2 * 60 * 60 * 1000; // 2 hours cooldown after a successful hit
+let lastSuccessfulSnipeTime = 0; // State variable for the Sniper Kill-Switch
 
 function isInDrawWindow() {
   const etStr = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
@@ -656,7 +660,15 @@ function isInDrawWindow() {
   // Evening Window: Starts 21:48 (when videos drop) until 22:05
   const eveningWindow = totalMin >= 21 * 60 + 48 && totalMin <= 22 * 60 + 5;
   
-  return middayWindow || eveningWindow;
+  const inTimeWindow = middayWindow || eveningWindow;
+
+  if (inTimeWindow && (Date.now() - lastSuccessfulSnipeTime < SNIPE_COOLDOWN_MS)) {
+    // We are in the window, but we already successfully sniped the draw.
+    // Return false to turn off the aggressive polling.
+    return false; 
+  }
+
+  return inTimeWindow;
 }
 
 /** Dynamic scheduler: switches between 30s (draw window) and normal interval. */
