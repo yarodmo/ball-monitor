@@ -166,7 +166,7 @@ RESPOND ONLY IN JSON:
     generationConfig: { temperature: 0.1, maxOutputTokens: 100 }
   };
 
-  const url = `${GEMINI_BASE}/models/gemini-2.5-flash:generateContent?key=${key}`;
+  const url = `${GEMINI_BASE}/models/gemini-3.1-flash:generateContent?key=${key}`;
   const response = await geminiPost(url, body);
   return parseGeminiNumbers(response, context);
 }
@@ -182,9 +182,31 @@ Output JSON: {"p3": "XXX", "p4": "XXXX"}`;
     generationConfig: { temperature: 0.1 }
   };
 
-  const url = `${GEMINI_BASE}/models/gemini-2.5-flash:generateContent?key=${key}`;
+  const url = `${GEMINI_BASE}/models/gemini-3.1-flash:generateContent?key=${key}`;
   const response = await geminiPost(url, body);
   return parseGeminiNumbers(response, "audio");
+}
+
+async function analyzeOracleWithGeminiPro(framesBase64, audioBase64) {
+  const key = getGeminiKey();
+  const prompt = `SUPREME ORACLE: You are verifying a FL Lottery draw. The previous extraction had conflicting audio/video. We provide key frames throughout the video, plus the audio track. Determine the definitive Pick 3 and Pick 4 numbers from the final summary board. Return JSON: {"p3": "XXX", "p4": "XXXX"}`;
+  
+  const parts = [{ text: prompt }];
+  for (const f of framesBase64) {
+    parts.push({ inline_data: { mime_type: "image/jpeg", data: f } });
+  }
+  if (audioBase64) {
+    parts.push({ inline_data: { mime_type: "audio/mpeg", data: audioBase64 } });
+  }
+
+  const body = {
+    contents: [{ parts }],
+    generationConfig: { temperature: 0.1 }
+  };
+
+  const url = `${GEMINI_BASE}/models/gemini-3.1-pro:generateContent?key=${key}`;
+  const response = await geminiPost(url, body);
+  return parseGeminiNumbers(response, "oracle");
 }
 
 async function geminiPost(url, body) {
@@ -310,7 +332,27 @@ async function analyzeVideo(videoUrl, videoId, videoTitle) {
     }
   }
 
-  const validated = crossValidate(visionResults, audioResult);
+  let validated = crossValidate(visionResults, audioResult);
+  
+  if (validated.confidence !== "high") {
+    log(`⚠️ Confidence is MEDIUM/LOW. Triggering EMERGENCY ORACLE (Gemini 3.1 Pro)...`);
+    try {
+      const framesB64 = frames.map(f => fs.readFileSync(f.path).toString("base64"));
+      const audioB64 = audioPath ? fs.readFileSync(audioPath).toString("base64") : null;
+      const oracleResult = await analyzeOracleWithGeminiPro(framesB64, audioB64);
+      if (oracleResult.p3 && oracleResult.p4) {
+        validated.p3 = oracleResult.p3;
+        validated.p4 = oracleResult.p4;
+        validated.confidence = "high_oracle_validated";
+        log(`  🏆 ORACLE RESOLVED: P3=${validated.p3} P4=${validated.p4}`);
+      } else {
+        log(`  ⚠️ ORACLE could not resolve numbers firmly.`);
+      }
+    } catch (e) {
+      log(`  ⚠️ Oracle API Error: ${e.message}`);
+    }
+  }
+
   const goldFrame = findGoldFrame(frames, visionResults);
 
   // Per user request: keep last 14, delete the rest
