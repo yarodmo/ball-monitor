@@ -166,7 +166,7 @@ RESPOND ONLY IN JSON:
     generationConfig: { temperature: 0.1, maxOutputTokens: 100 }
   };
 
-  const url = `${GEMINI_BASE}/models/gemini-3.1-flash:generateContent?key=${key}`;
+  const url = `${GEMINI_BASE}/models/gemini-2.5-flash:generateContent?key=${key}`;
   const response = await geminiPost(url, body);
   return parseGeminiNumbers(response, context);
 }
@@ -182,7 +182,7 @@ Output JSON: {"p3": "XXX", "p4": "XXXX"}`;
     generationConfig: { temperature: 0.1 }
   };
 
-  const url = `${GEMINI_BASE}/models/gemini-3.1-flash:generateContent?key=${key}`;
+  const url = `${GEMINI_BASE}/models/gemini-2.5-flash:generateContent?key=${key}`;
   const response = await geminiPost(url, body);
   return parseGeminiNumbers(response, "audio");
 }
@@ -204,7 +204,7 @@ async function analyzeOracleWithGeminiPro(framesBase64, audioBase64) {
     generationConfig: { temperature: 0.1 }
   };
 
-  const url = `${GEMINI_BASE}/models/gemini-3.1-pro:generateContent?key=${key}`;
+  const url = `${GEMINI_BASE}/models/gemini-2.5-pro:generateContent?key=${key}`;
   const response = await geminiPost(url, body);
   return parseGeminiNumbers(response, "oracle");
 }
