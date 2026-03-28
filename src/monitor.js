@@ -545,57 +545,56 @@ async function pollChannel() {
       }
 
       log(`🎯 NEW DRAW VIDEO: "${video.title}" → ${draw.type} [period=${draw.period}]`);
-      lastSuccessfulSnipeTime = Date.now(); // 💥 SNIPER KILL-SWITCH ACTIVADO
-      log(`🛑 Kill-Switch activado: Misión completada, abortando sondeo agresivo.`);
+
+      let extractionSuccess = false;
 
       // ── Analyze video with AI + Notify Ballbot with extracted numbers ────
-      // Runs SYNCHRONOUSLY — we need the video analysis to complete before proceeding
-      // so the numbers are included in the webhook payload
       if (draw.period) {
         let extractedNumbers = null;
         try {
-          // ── Step 1: AI Video Analysis & Ballbot Notification ─────────────
-          // notifyBallbot performs the AI analysis and sends the Webhook
           extractedNumbers = await notifyBallbot(draw, video);
+          if (extractedNumbers && extractedNumbers.p3 && extractedNumbers.p4) {
+            extractionSuccess = true;
+          }
         } catch (e) {
           log(`❌ notifyBallbot error: ${e.message}`);
         }
 
-        // ── Step 2: Capture frame for email (prefer forensic Gold Frame) ──
+        // ── Step 2: Capture frame for email ──
         let imagePath = extractedNumbers?.goldFrame || null;
-        
         if (!imagePath) {
           try {
             imagePath = await captureFrame(video.url, video.id);
           } catch (e) {
-            log(`⚠️  Frame capture failed: ${e.message} — sending email without image`);
+            log(`⚠️  Frame capture failed: ${e.message}`);
           }
-        } else {
-          log(`🔎 Using Forensic Gold Frame: ${imagePath}`);
         }
 
-        // ── Step 3: Send email notification ────────────────────────────────
+        // ── Step 3: Send email notification ──
         try {
           if (CONFIG.smtp && CONFIG.smtp.user && CONFIG.smtp.user !== "TU_EMAIL@gmail.com") {
             await sendEmail(draw, imagePath, video.url, video.title, extractedNumbers);
-          } else {
-            log(`📧 SMTP no configurado — email omitido`);
           }
         } catch (e) {
           log(`❌ Email failed: ${e.message}`);
         }
       } else {
         log(`⚠️  No period mapped for "${draw.type}" — notifications skipped`);
+        extractionSuccess = true; 
       }
 
-      state.processedVideos.push(video.id);
-
-      // Keep state clean — only last 200 video IDs
-      if (state.processedVideos.length > 200) {
-        state.processedVideos = state.processedVideos.slice(-200);
+      if (extractionSuccess) {
+        lastSuccessfulSnipeTime = Date.now(); // 💥 SNIPER KILL-SWITCH ACTIVADO
+        log(`🛑 Kill-Switch activado: Misión completada, abortando sondeo agresivo.`);
+        state.processedVideos.push(video.id);
+        
+        if (state.processedVideos.length > 200) {
+          state.processedVideos = state.processedVideos.slice(-200);
+        }
+        saveState(state);
+      } else {
+        log(`⚠️ Misión incompleta para "${video.title}". Se reintentará en el próximo ciclo.`);
       }
-
-      saveState(state);
     }
   } catch (e) {
     log(`❌ Poll error: ${e.message}`);
