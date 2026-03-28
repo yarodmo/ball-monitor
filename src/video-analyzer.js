@@ -335,7 +335,7 @@ async function analyzeVideo(videoUrl, videoId, videoTitle) {
   let validated = crossValidate(visionResults, audioResult);
   
   if (validated.confidence !== "high") {
-    log(`⚠️ Confidence is MEDIUM/LOW. Triggering EMERGENCY ORACLE (Gemini 3.1 Pro)...`);
+    log(`⚠️ Confidence is MEDIUM/LOW. Triggering EMERGENCY ORACLE (Gemini 2.5 Pro)...`);
     try {
       const framesB64 = frames.map(f => fs.readFileSync(f.path).toString("base64"));
       const audioB64 = audioPath ? fs.readFileSync(audioPath).toString("base64") : null;
