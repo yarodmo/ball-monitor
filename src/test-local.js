@@ -125,11 +125,13 @@ async function main() {
     config = require("../config/config.json");
   } catch {}
 
-  const webhookUrl = config.webhook_url || "";
-  if (!webhookUrl) {
+  const webhookUrls = config.webhook_url ? config.webhook_url.split(",").map(u => u.trim()).filter(Boolean) : [];
+  if (webhookUrls.length === 0) {
     console.log("\n   ℹ️  webhook_url not configured — production endpoint: http://localhost:3000/api/auto-draw");
   } else {
-    console.log(`\n   🎯 Would POST to: ${webhookUrl}`);
+    for (const u of webhookUrls) {
+      console.log(`\n   🎯 Would POST to: ${u}`);
+    }
   }
 
   console.log("\n═══════════════════════════════════════════════════════");

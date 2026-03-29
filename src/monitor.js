@@ -278,6 +278,7 @@ async function notifyBallbot(draw, video) {
     return;
   }
 
+  const webhooks = CONFIG.webhook_url.split(",").map(u => u.trim()).filter(Boolean);
   const drawDate = formatDrawDate(video.title);
 
   // ── Step 1: AI Video Analysis ─────────────────────────────────────────
@@ -319,18 +320,23 @@ async function notifyBallbot(draw, video) {
     const maxRetries = 3;
     const retryDelay = 10000;
 
-    let success = false;
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        log(`📡 Sending [${payloadItem.game.toUpperCase()}] to Ballbot...`);
-        const raw = await httpPost(CONFIG.webhook_url, payload);
-        const response = JSON.parse(raw);
-        log(`✅ Ballbot notificado [${payloadItem.game.toUpperCase()}]: ${response.message || "OK"}`);
-        success = true;
-        break;
-      } catch (e) {
-        log(`❌ Webhook error [${payloadItem.game.toUpperCase()}] (intento ${attempt}/${maxRetries}): ${e.message}`);
-        if (attempt < maxRetries) await sleep(retryDelay);
+    for (const targetUrl of webhooks) {
+      let success = false;
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          log(`📡 Sending [${payloadItem.game.toUpperCase()}] to webhook: ${targetUrl}...`);
+          const raw = await httpPost(targetUrl, payload);
+          const response = JSON.parse(raw);
+          log(`✅ Ballbot notificado [${payloadItem.game.toUpperCase()}] en ${targetUrl}: ${response.message || "OK"}`);
+          success = true;
+          break;
+        } catch (e) {
+          log(`❌ Webhook error [${payloadItem.game.toUpperCase()}] at ${targetUrl} (intento ${attempt}/${maxRetries}): ${e.message}`);
+          if (attempt < maxRetries) await sleep(retryDelay);
+        }
+      }
+      if (!success) {
+        log(`⚠️ Could not notify ${targetUrl} after ${maxRetries} attempts.`);
       }
     }
   }
