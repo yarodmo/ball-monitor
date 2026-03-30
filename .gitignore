@@ -5,3 +5,4 @@ logs/
 .DS_Store
 config/state.json
 test-sniper.js
+src/test-real-send.js
