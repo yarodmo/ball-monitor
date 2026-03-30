@@ -74,12 +74,22 @@ async function main() {
     }).on("error", reject);
   });
 
-  const entryMatch = rssXml.match(/<entry>([\s\S]*?)<\/entry>/);
-  if (!entryMatch) throw new Error("No videos found");
-  
-  const videoId = (entryMatch[1].match(/yt:videoId>(.*?)<\/yt:videoId/) || [])[1];
-  const videoTitle = (entryMatch[1].match(/<title>(.*?)<\/title>/) || [])[1] || "";
-  const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const entries = [...rssXml.matchAll(/<entry>([\s\S]*?)<\/entry>/g)];
+  if (!entries.length) throw new Error("No videos found");
+
+  let videoId, videoTitle, videoUrl;
+  for (const match of entries) {
+    const entry = match[1];
+    const title = (entry.match(/<title>(.*?)<\/title>/) || [])[1] || "";
+    if (title.toLowerCase().includes("pick mid") || title.toLowerCase().includes("pick eve")) {
+      videoTitle = title.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+      videoId = (entry.match(/yt:videoId>(.*?)<\/yt:videoId/) || [])[1];
+      videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+      break;
+    }
+  }
+
+  if (!videoId) throw new Error("No Pick Midday/Evening videos found in recent feed.");
   
   log(`🎬 Detected Latest: "${videoTitle}" (${videoId})`);
 
