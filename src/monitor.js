@@ -646,11 +646,11 @@ function startStatusServer() {
 
 // ─── Smart Window Polling ───────────────────────────────────────────────────
 // Normal mode: every CONFIG.poll_interval_ms (default 120s)
-// Draw window: every 15s when close to expected YouTube upload time
-//   Midday window:  13:33–13:55 ET  (draw 13:30, video usually posted 13:35–13:45)
-//   Evening window: 21:48–22:05 ET  (draw 21:45, video usually posted 21:50–22:00)
+// APEX Draw window: every 10s when close to expected YouTube upload time
+//   Midday window:  13:31–13:55 ET  (draw 13:30, video usually posted 13:33–13:45)
+//   Evening window: 21:46–22:05 ET  (draw 21:45, video usually posted 21:48–22:00)
 
-const WINDOW_INTERVAL_MS = 15_000; // 15 seconds for Instant-Hit detection
+const WINDOW_INTERVAL_MS = 10_000; // 10 seconds for APEX Instant-Hit detection
 const SNIPE_COOLDOWN_MS = 2 * 60 * 60 * 1000; // 2 hours cooldown after a successful hit
 let lastSuccessfulSnipeTime = 0; // State variable for the Sniper Kill-Switch
 
@@ -659,11 +659,11 @@ function isInDrawWindow() {
   const et = new Date(etStr);
   const totalMin = et.getHours() * 60 + et.getMinutes();
   
-  // Midday Window: Starts 13:33 (when videos drop) until 13:55
-  const middayWindow = totalMin >= 13 * 60 + 33 && totalMin <= 13 * 60 + 55;
+  // Midday Window: Starts 13:31 (ultra-anticipation) until 13:55
+  const middayWindow = totalMin >= 13 * 60 + 31 && totalMin <= 13 * 60 + 55;
   
-  // Evening Window: Starts 21:48 (when videos drop) until 22:05
-  const eveningWindow = totalMin >= 21 * 60 + 48 && totalMin <= 22 * 60 + 5;
+  // Evening Window: Starts 21:46 (ultra-anticipation) until 22:05
+  const eveningWindow = totalMin >= 21 * 60 + 46 && totalMin <= 22 * 60 + 5;
   
   const inTimeWindow = middayWindow || eveningWindow;
 
