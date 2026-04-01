@@ -1,17 +1,22 @@
 /**
- * VideoAnalyzer — AI-Powered Lottery Number Extraction (v3 BLISS APEX)
+ * VideoAnalyzer — AI-Powered Lottery Number Extraction (v4 IRONCLAD)
  * 
  * ARCHITECTURE:
- *   PRIMARY   → Full video upload to Gemini File API → single holistic analysis
- *   SECONDARY → Frame-by-frame vision analysis (voting consensus)
- *   TERTIARY  → Audio transcription cross-validation
- *   ORACLE    → Gemini Pro with all evidence combined (only if disagreement)
+ *   PRIMARY   → Audio transcription (announcer says each digit clearly)
+ *   SECONDARY → Summary Board frames (printed text at end of video, 48-55s)
  * 
- * KEY CHANGES (v3):
- *   - REMOVED generateDateBlacklist (caused hallucinations via negative prompting)
- *   - ADDED Gemini File API upload for full-video temporal analysis
- *   - FIXED yt-dlp to force overwrite cached videos (--force-overwrites)
- *   - REWRITTEN prompts: positive reinforcement only, zero negation
+ *   NO full video upload (saves 30s+ upload/processing)
+ *   NO shotgun 17-frame extraction (saves 12+ API calls)
+ *   NO Oracle/Gemini Pro (introduced errors, never corrected any)
+ * 
+ * Audio is ground truth. Summary Board is confirmation.
+ * 
+ * HISTORICAL JUSTIFICATION:
+ *   - Oracle confirmed date-as-numbers hallucination (20260330-M)
+ *   - Oracle introduced 6→9 error overriding correct audio (20260401-M)
+ *   - Oracle never corrected a single error in 3 invocations (0/3)
+ *   - Vision (Gemini 2.5 Flash) intermittently returns text instead of JSON
+ *   - Audio correctly identified numbers in ALL documented cases
  * 
  * @module video-analyzer
  */
@@ -25,10 +30,7 @@ require("dotenv").config({ path: path.join(__dirname, "../.env") });
 // ─── Constants ──────────────────────────────────────────────────────────────
 const WORK_DIR = path.join(__dirname, "../captures/analysis");
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
-const GEMINI_UPLOAD = "https://generativelanguage.googleapis.com/upload/v1beta";
 const MAX_ANALYSES_TO_KEEP = 14;
-const SCAN_INTERVAL_SEC = 3;
-const VIDEO_DURATION_EST = 60;
 
 if (!fs.existsSync(WORK_DIR)) fs.mkdirSync(WORK_DIR, { recursive: true });
 
@@ -98,28 +100,7 @@ async function downloadVideo(videoUrl, videoId, folderPath) {
   return mp4Path;
 }
 
-// ─── Step 2: Dynamic Frame Extraction ───────────────────────────────────────
-function extractDynamicFrames(videoPath, folderPath) {
-  log(`🖼️  Performing dynamic scan extraction...`);
-  const frames = [];
-  for (let sec = 5; sec < VIDEO_DURATION_EST; sec += SCAN_INTERVAL_SEC) {
-    const label = `scan_${sec}s`;
-    const framePath = path.join(folderPath, `frame_${label}.jpg`);
-    const timestamp = `00:00:${String(sec).padStart(2, "0")}`;
-    try {
-      execSync(
-        `ffmpeg -i "${videoPath}" -ss ${timestamp} -vframes 1 -q:v 2 "${framePath}" -y 2>&1`,
-        { timeout: 30000, stdio: "pipe" }
-      );
-      if (fs.existsSync(framePath)) frames.push({ path: framePath, label, sec });
-    } catch (e) {
-      log(`  ⚠️  Frame extraction at ${sec}s skipped.`);
-    }
-  }
-  return frames;
-}
-
-// ─── Step 3: Extract Audio ──────────────────────────────────────────────────
+// ─── Step 2: Extract Audio ──────────────────────────────────────────────────
 function extractAudio(videoPath, folderPath) {
   const audioPath = path.join(folderPath, `audio.mp3`);
   log(`🔊 Extracting audio track...`);
@@ -134,310 +115,121 @@ function extractAudio(videoPath, folderPath) {
   return fs.existsSync(audioPath) ? audioPath : null;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// ─── GEMINI FILE API: Full Video Upload & Analysis ──────────────────────────
-// ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * Uploads a video file to Gemini File API via multipart/related upload.
- * Returns { name, uri, state } from the API response.
- */
-async function uploadToGeminiFiles(videoPath) {
-  const key = getGeminiKey();
-  const videoBuffer = fs.readFileSync(videoPath);
-  const displayName = path.basename(videoPath);
-  log(`📤 Uploading video to Gemini File API (${(videoBuffer.length / 1024 / 1024).toFixed(1)} MB)...`);
-
-  const boundary = "BLISS_UPLOAD_" + Date.now();
-  const metadata = JSON.stringify({ file: { displayName } });
-
-  const bodyParts = [
-    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n`,
-    `--${boundary}\r\nContent-Type: video/mp4\r\n\r\n`
-  ];
-  const bodyEnd = `\r\n--${boundary}--\r\n`;
-
-  const body = Buffer.concat([
-    Buffer.from(bodyParts[0]),
-    Buffer.from(bodyParts[1]),
-    videoBuffer,
-    Buffer.from(bodyEnd)
-  ]);
-
-  return new Promise((resolve, reject) => {
-    const url = new URL(`${GEMINI_UPLOAD}/files?key=${key}`);
-    const opts = {
-      hostname: url.hostname,
-      path: url.pathname + url.search,
-      method: "POST",
-      headers: {
-        "Content-Type": `multipart/related; boundary=${boundary}`,
-        "X-Goog-Upload-Protocol": "multipart",
-        "Content-Length": body.length
-      },
-      timeout: 180000 // 3 minutes for upload
-    };
-
-    const req = https.request(opts, (res) => {
-      let data = "";
-      res.on("data", c => data += c);
-      res.on("end", () => {
-        if (res.statusCode === 200) {
-          const parsed = JSON.parse(data);
-          const file = parsed.file;
-          log(`  ✅ Upload complete: ${file.name} (state: ${file.state})`);
-          resolve(file);
-        } else {
-          reject(new Error(`File API upload failed [${res.statusCode}]: ${data}`));
-        }
-      });
-    });
-    req.on("error", reject);
-    req.on("timeout", () => { req.destroy(); reject(new Error("File API upload timed out")); });
-    req.write(body);
-    req.end();
-  });
-}
-
-/**
- * Polls Gemini File API until the file state becomes ACTIVE.
- * Max 120 seconds polling (videos typically process in 10-30s).
- */
-async function waitForFileActive(fileName) {
-  const key = getGeminiKey();
-  const maxWait = 120000; // 2 minutes
-  const pollInterval = 5000; // 5 seconds
-  const start = Date.now();
-
-  log(`⏳ Waiting for Gemini to process video...`);
-
-  while (Date.now() - start < maxWait) {
-    const file = await new Promise((resolve, reject) => {
-      const url = new URL(`${GEMINI_BASE}/${fileName}?key=${key}`);
-      https.get({ hostname: url.hostname, path: url.pathname + url.search, timeout: 30000 }, (res) => {
-        let data = "";
-        res.on("data", c => data += c);
-        res.on("end", () => {
-          if (res.statusCode === 200) resolve(JSON.parse(data));
-          else reject(new Error(`File status check failed [${res.statusCode}]: ${data}`));
-        });
-      }).on("error", reject);
-    });
-
-    if (file.state === "ACTIVE") {
-      log(`  ✅ Video processed and ACTIVE (${((Date.now() - start) / 1000).toFixed(1)}s)`);
-      return file;
-    }
-    if (file.state === "FAILED") {
-      throw new Error(`Gemini video processing FAILED: ${JSON.stringify(file)}`);
-    }
-
-    await new Promise(r => setTimeout(r, pollInterval));
-  }
-
-  throw new Error("Gemini video processing timed out after 120s");
-}
-
-/**
- * Deletes a file from Gemini File API (cleanup after analysis).
- */
-async function deleteGeminiFile(fileName) {
-  const key = getGeminiKey();
-  try {
-    await new Promise((resolve, reject) => {
-      const url = new URL(`${GEMINI_BASE}/${fileName}?key=${key}`);
-      const opts = { hostname: url.hostname, path: url.pathname + url.search, method: "DELETE", timeout: 15000 };
-      const req = https.request(opts, (res) => {
-        let data = "";
-        res.on("data", c => data += c);
-        res.on("end", () => resolve());
-      });
-      req.on("error", reject);
-      req.end();
-    });
-    log(`  🗑️  Cleaned up uploaded file: ${fileName}`);
-  } catch (e) {
-    log(`  ⚠️  File cleanup failed (non-critical): ${e.message}`);
-  }
-}
-
-// ─── PRIMARY CHANNEL: Full Video Analysis ───────────────────────────────────
-
-const FULL_VIDEO_PROMPT = `You are a forensic lottery number extraction system analyzing an official Florida Lottery drawing video.
-
-VIDEO STRUCTURE (segments appear in this exact order):
-1. Intro splash — Florida Lottery logo and draw date (IGNORE all text/numbers here)
-2. Pick 2 drawing — 2 balls drawn (IGNORE this segment entirely)
-3. Pick 3 drawing — 3 balls drawn → EXTRACT THESE 3 DIGITS
-4. Pick 4 drawing — 4 balls drawn → EXTRACT THESE 4 DIGITS
-5. Pick 5 drawing — 5 balls drawn (IGNORE this segment entirely)
-6. Fireball drawing — 1 red ball (IGNORE this)
-7. Final Summary Board — Lists all results in a graphic table (HIGHEST PRIORITY SOURCE)
-
-EXTRACTION RULES:
-- ONLY report numbers from the PICK 3 and PICK 4 segments
-- The FINAL SUMMARY BOARD (blue/white results table shown at the end) is the GROUND TRUTH
-- Each segment is introduced by an on-screen label: "Pick 2", "Pick 3", "Pick 4", "Pick 5"
-- Balls have single digits (0-9) printed on them
-- For 6 vs 9 disambiguation: look for the underline/dash mark on the ball
-- COUNT the balls in each segment to confirm you're in the right game (3 balls = Pick 3, 4 balls = Pick 4)
-
-Respond ONLY in valid JSON:
-{"p3": "XXX", "p4": "XXXX"}
-Where XXX is exactly 3 digits and XXXX is exactly 4 digits.`;
-
-async function analyzeFullVideoWithGemini(videoPath) {
-  log(`🎯 PRIMARY CHANNEL: Full Video Analysis via Gemini File API...`);
+// ─── Step 3: Extract Summary Board Frames (targeted, 48-55s) ────────────────
+function extractSummaryBoardFrames(videoPath, folderPath) {
+  log(`🖼️  Extracting Summary Board frames (48-55s window)...`);
+  const frames = [];
+  // The Summary Board appears at the end of the video, typically 48-55s.
+  // It's a PRINTED GRAPHIC with digital text — immune to 6/9 ball confusion.
+  const timestamps = [48, 51, 54];
   
-  let uploadedFile = null;
-  try {
-    // 1. Upload video
-    uploadedFile = await uploadToGeminiFiles(videoPath);
-    
-    // 2. Wait for processing
-    const activeFile = await waitForFileActive(uploadedFile.name);
-    
-    // 3. Analyze with full temporal context
-    const key = getGeminiKey();
-    const body = {
-      contents: [{
-        parts: [
-          { text: FULL_VIDEO_PROMPT },
-          { file_data: { mime_type: "video/mp4", file_uri: activeFile.uri } }
-        ]
-      }],
-      generationConfig: { temperature: 0.1, maxOutputTokens: 200 }
-    };
-
-    const url = `${GEMINI_BASE}/models/gemini-2.5-flash:generateContent?key=${key}`;
-    const response = await geminiPost(url, body);
-    const result = parseGeminiNumbers(response, "full_video");
-    
-    log(`  🎯 Full Video Result: P3=${result.p3 || "?"} P4=${result.p4 || "?"}`);
-    return result;
-  } catch (e) {
-    log(`  ⚠️ Full Video Analysis failed: ${e.message}`);
-    return { p3: null, p4: null, is_summary: false };
-  } finally {
-    // Cleanup uploaded file
-    if (uploadedFile?.name) {
-      deleteGeminiFile(uploadedFile.name).catch(() => {});
+  for (const sec of timestamps) {
+    const framePath = path.join(folderPath, `frame_summary_${sec}s.jpg`);
+    const timestamp = `00:00:${String(sec).padStart(2, "0")}`;
+    try {
+      execSync(
+        `ffmpeg -i "${videoPath}" -ss ${timestamp} -vframes 1 -q:v 2 "${framePath}" -y 2>&1`,
+        { timeout: 30000, stdio: "pipe" }
+      );
+      if (fs.existsSync(framePath)) {
+        frames.push({ path: framePath, label: `summary_${sec}s`, sec });
+      }
+    } catch (e) {
+      log(`  ⚠️  Frame extraction at ${sec}s skipped.`);
     }
   }
+  
+  log(`  ✅ Extracted ${frames.length} summary board frames`);
+  return frames;
 }
 
-// ─── SECONDARY CHANNEL: Frame-by-Frame Vision ──────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// ─── PRIMARY CHANNEL: Audio Transcription ───────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
 
-const FRAME_PROMPT_TEMPLATE = `FORENSIC LOTTERY FRAME ANALYZER
-You are examining a single frame from an official Florida Lottery drawing video.
-Frame timestamp: FRAME_CONTEXT
+const AUDIO_PROMPT = `You are transcribing an official Florida Lottery drawing audio.
+The announcer reads the winning numbers for each game in order: Pick 2, Pick 3, Pick 4, Pick 5, Fireball.
 
-TASK: Extract Pick 3 (3 digits) and Pick 4 (4 digits) winning numbers ONLY.
+TASK: Listen carefully and extract ONLY the Pick 3 (3 digits) and Pick 4 (4 digits) winning numbers.
 
-WHAT TO LOOK FOR:
-- Physical lottery balls inside transparent display tubes, each showing a single digit (0-9)
-- A blue/white SUMMARY BOARD graphic listing all game results
-- On-screen "Pick 3" or "Pick 4" labels identifying which game is shown
+CRITICAL DIGIT DISAMBIGUATION:
+- "SIX" sounds like /sɪks/ — one syllable, ends with a hard "ks" sound
+- "NINE" sounds like /naɪn/ — starts with an "n" sound, ends with an "n" sound
+- "FIVE" sounds like /faɪv/ — starts with an "f" sound, ends with "v"
+- "FOUR" sounds like /fɔːr/ — starts with an "f" sound, ends with "r"
+- The announcer clearly and deliberately enunciates each individual digit
+- Trust EXACTLY what you hear — do not guess or infer from context
 
-WHAT TO IGNORE:
-- The intro date splash screen
-- Pick 2, Pick 5, and Fireball results
-- Any text that is NOT the lottery numbers (logos, dates, tickers)
+STRUCTURE: The announcer says something like:
+"The Pick 3 winning numbers are [digit], [digit], [digit]"
+"The Pick 4 winning numbers are [digit], [digit], [digit], [digit]"
 
-For 6 vs 9: Look for the underline/dash mark on the ball face.
-If this frame shows a FINAL SUMMARY BOARD with all games listed, mark is_summary as true.
+Respond ONLY in valid JSON, nothing else:
+{"p3": "XXX", "p4": "XXXX"}`;
 
-Respond ONLY in valid JSON:
-{"p3": "XXX", "p4": "XXXX", "is_summary": true/false}
-Use null for values you cannot confidently read.`;
-
-async function analyzeFrameWithGemini(imagePath, context) {
+async function analyzeAudioWithGemini(audioPath) {
+  log(`🔊 PRIMARY CHANNEL: Audio Transcription (Ground Truth)...`);
   const key = getGeminiKey();
-  const imageData = fs.readFileSync(imagePath).toString("base64");
-  const prompt = FRAME_PROMPT_TEMPLATE.replace("FRAME_CONTEXT", context);
-
+  const audioData = fs.readFileSync(audioPath).toString("base64");
+  
   const body = {
-    contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: "image/jpeg", data: imageData } }] }],
-    generationConfig: {
-      temperature: 0.1,
-      maxOutputTokens: 100,
-      responseMimeType: "application/json"
-    }
+    contents: [{ parts: [{ text: AUDIO_PROMPT }, { inline_data: { mime_type: "audio/mpeg", data: audioData } }] }],
+    generationConfig: { temperature: 0.1 }
   };
 
-  // Use gemini-2.5-flash for frame analysis: faster, follows format instructions better
+  const url = `${GEMINI_BASE}/models/gemini-2.5-flash:generateContent?key=${key}`;
+  const response = await geminiPost(url, body);
+  const result = parseGeminiNumbers(response, "audio");
+  log(`  🔊 Audio Result: P3=${result.p3 || "?"} P4=${result.p4 || "?"}`);
+  return result;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ─── SECONDARY CHANNEL: Summary Board Vision ───────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+
+const SUMMARY_BOARD_PROMPT = `FORENSIC SUMMARY BOARD READER
+
+You are examining a frame from the END of an official Florida Lottery drawing video.
+This frame should show the FINAL SUMMARY BOARD — a blue/white graphic table listing all game results.
+
+TASK: Read the Pick 3 (3 digits) and Pick 4 (4 digits) winning numbers from the summary board.
+
+WHAT TO LOOK FOR:
+- A blue/white SUMMARY TABLE graphic showing results for all games
+- The rows labeled "Pick 3" and "Pick 4" with their winning numbers
+- This is PRINTED TEXT on a graphic overlay, NOT physical lottery balls
+- The numbers are displayed as clean digital text — no ball rotation ambiguity
+
+WHAT TO IGNORE:
+- Pick 2, Pick 5, and Fireball results
+- Any logos, dates, or decorative elements
+
+If this frame does NOT show a summary board (e.g., it shows balls being drawn, an intro screen, 
+or credits), set both values to null and is_summary to false.
+
+Respond ONLY in valid JSON, nothing else:
+{"p3": "XXX", "p4": "XXXX", "is_summary": true}
+
+Use null for values you cannot read. Set is_summary to false if no summary board is visible.`;
+
+async function analyzeSummaryBoardFrame(imagePath, context) {
+  const key = getGeminiKey();
+  const imageData = fs.readFileSync(imagePath).toString("base64");
+
+  const body = {
+    contents: [{ parts: [{ text: SUMMARY_BOARD_PROMPT }, { inline_data: { mime_type: "image/jpeg", data: imageData } }] }],
+    generationConfig: { temperature: 0.1 }
+  };
+
   const url = `${GEMINI_BASE}/models/gemini-2.5-flash:generateContent?key=${key}`;
   const response = await geminiPost(url, body);
   return parseGeminiNumbers(response, context);
 }
 
-// ─── TERTIARY CHANNEL: Audio Transcription ──────────────────────────────────
-
-async function analyzeAudioWithGemini(audioPath) {
-  const key = getGeminiKey();
-  const audioData = fs.readFileSync(audioPath).toString("base64");
-  
-  const prompt = `You are transcribing an official Florida Lottery drawing audio.
-The announcer reads the winning numbers for each game in order: Pick 2, Pick 3, Pick 4, Pick 5, Fireball.
-
-TASK: Listen carefully and extract ONLY the Pick 3 (3 digits) and Pick 4 (4 digits) winning numbers.
-Pay careful attention to distinguish "six" from "nine" in the announcer's voice.
-
-Respond ONLY in valid JSON:
-{"p3": "XXX", "p4": "XXXX"}`;
-
-  const body = {
-    contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: "audio/mpeg", data: audioData } }] }],
-    generationConfig: { temperature: 0.1 }
-  };
-
-  const url = `${GEMINI_BASE}/models/gemini-2.5-flash:generateContent?key=${key}`;
-  const response = await geminiPost(url, body);
-  return parseGeminiNumbers(response, "audio");
-}
-
-// ─── ORACLE: Emergency Dispute Resolution ───────────────────────────────────
-
-async function analyzeOracleWithGeminiPro(framesBase64, audioBase64) {
-  const key = getGeminiKey();
-  
-  const prompt = `SUPREME ORACLE — FINAL ARBITRATION
-
-You are the final judge resolving a conflict between multiple AI channels analyzing a Florida Lottery drawing.
-
-You are provided with:
-1. Key video frames from throughout the drawing
-2. The full audio track
-
-CRITICAL INSTRUCTIONS:
-- The video shows games in order: Pick 2 → Pick 3 → Pick 4 → Pick 5 → Fireball
-- Look for the FINAL SUMMARY BOARD (blue/white results table) — this is absolute ground truth
-- Count the physical balls in each segment: 3 balls = Pick 3, 4 balls = Pick 4
-- For 6 vs 9: look for the underline mark on the ball face
-- Cross-reference what you SEE with what you HEAR
-
-Return ONLY the Pick 3 and Pick 4 results.
-Respond in valid JSON: {"p3": "XXX", "p4": "XXXX"}`;
-
-  const parts = [{ text: prompt }];
-  for (const f of framesBase64) {
-    parts.push({ inline_data: { mime_type: "image/jpeg", data: f } });
-  }
-  if (audioBase64) {
-    parts.push({ inline_data: { mime_type: "audio/mpeg", data: audioBase64 } });
-  }
-
-  const body = {
-    contents: [{ parts }],
-    generationConfig: { temperature: 0.1 }
-  };
-
-  const url = `${GEMINI_BASE}/models/gemini-2.5-pro:generateContent?key=${key}`;
-  const response = await geminiPost(url, body);
-  return parseGeminiNumbers(response, "oracle");
-}
-
+// ═══════════════════════════════════════════════════════════════════════════
 // ─── HTTP & Parsing Utilities ───────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
 
 async function geminiPost(url, body) {
   const MAX_RETRIES = 3;
@@ -467,7 +259,7 @@ function _geminiPostSingle(url, body) {
       path: parsed.pathname + parsed.search,
       method: "POST",
       headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) },
-      timeout: 120000 // 2 minutes for video analysis
+      timeout: 120000
     };
     const req = https.request(opts, (res) => {
       let d = "";
@@ -485,14 +277,12 @@ function parseGeminiNumbers(response, source) {
   try {
     const parts = response?.candidates?.[0]?.content?.parts || [];
     
-    // Gemini 2.5 Flash/Pro uses "thinking" mode: parts[0] = thinking, parts[1+] = answer
-    // Scan ALL parts for a JSON response, prioritizing non-thinking parts
+    // Strategy 1: Find JSON in non-thinking parts (Gemini 2.5 uses thinking mode)
     let jsonText = null;
     
     for (let i = parts.length - 1; i >= 0; i--) {
       const part = parts[i];
-      // Skip thinking parts (they have thought: true)
-      if (part.thought) continue;
+      if (part.thought) continue; // Skip thinking parts
       
       const text = part.text || "";
       const match = text.match(/\{[^}]+\}/);
@@ -502,7 +292,7 @@ function parseGeminiNumbers(response, source) {
       }
     }
     
-    // Fallback: if no non-thinking part had JSON, try ALL parts
+    // Strategy 2: Fallback — try ALL parts including thinking
     if (!jsonText) {
       for (const part of parts) {
         const text = part.text || "";
@@ -514,11 +304,13 @@ function parseGeminiNumbers(response, source) {
       }
     }
 
+    // Strategy 3: Plaintext fallback — extract numbers from non-JSON responses
     if (!jsonText) {
-      // Diagnostic: log what we actually received
+      const allText = parts.map(p => p.text || "").join(" ");
       const preview = parts.map((p, i) => `part[${i}] thought=${!!p.thought} len=${(p.text||"").length}`).join(", ");
-      log(`  🔍 [${source}] No JSON found in response. Parts: ${preview}`);
-      return { p3: null, p4: null, is_summary: false };
+      log(`  🔍 [${source}] No JSON found. Parts: ${preview}`);
+      log(`  🔍 [${source}] Attempting plaintext extraction from: "${allText.substring(0, 120)}"`);
+      return extractNumbersFromPlaintext(allText, source);
     }
     
     const p = JSON.parse(jsonText);
@@ -533,84 +325,141 @@ function parseGeminiNumbers(response, source) {
   }
 }
 
-// ─── Cross-Validation Engine ────────────────────────────────────────────────
+/**
+ * Extracts P3 (3-digit) and P4 (4-digit) numbers from plaintext responses.
+ * Handles cases where Gemini returns text instead of JSON:
+ *   "Pick 3: 726, Pick 4: 5787"
+ *   "P3=726 P4=5787"
+ *   "The numbers are 726 and 5787"
+ *   "726 5787"
+ */
+function extractNumbersFromPlaintext(text, source) {
+  let p3 = null;
+  let p4 = null;
 
-function crossValidateAllChannels(fullVideoResult, visionResults, audioResult) {
-  log(`🔬 CROSS-VALIDATING ALL CHANNELS...`);
-  log(`  📹 Full Video:  P3=${fullVideoResult.p3 || "?"} P4=${fullVideoResult.p4 || "?"}`);
+  // Pattern 1: Labeled "Pick 3: 726" or "P3: 726" or "P3=726"
+  const p3Match = text.match(/(?:pick\s*3|p3)\s*[:=\s]\s*(\d{3})\b/i);
+  const p4Match = text.match(/(?:pick\s*4|p4)\s*[:=\s]\s*(\d{4})\b/i);
+  if (p3Match) p3 = p3Match[1];
+  if (p4Match) p4 = p4Match[1];
 
-  // Frame voting
+  // Pattern 2: Standalone 3-digit and 4-digit numbers
+  if (!p3 || !p4) {
+    const allNumbers = text.match(/\b\d{3,4}\b/g) || [];
+    for (const num of allNumbers) {
+      if (num.length === 3 && !p3) p3 = num;
+      else if (num.length === 4 && !p4) p4 = num;
+    }
+  }
+
+  if (p3 || p4) {
+    log(`  ✅ [${source}] Plaintext extraction: P3=${p3 || "?"} P4=${p4 || "?"}`);
+  } else {
+    log(`  ❌ [${source}] Plaintext extraction failed — no valid numbers found`);
+  }
+
+  return { p3, p4, is_summary: false };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ─── Cross-Validation Engine (Audio-First Authority) ────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+
+function crossValidate(audioResult, summaryResults) {
+  log(`🔬 CROSS-VALIDATION: Audio (PRIMARY) + Summary Board (CONFIRMATION)`);
+  log(`  🔊 Audio:         P3=${audioResult.p3 || "?"} P4=${audioResult.p4 || "?"}`);
+
+  // Aggregate Summary Board results with weighted voting
   const p3Votes = {};
   const p4Votes = {};
-  for (const vr of visionResults) {
-    const weight = vr.is_summary ? 10 : 1;
-    if (vr.p3 && vr.p3.length === 3) p3Votes[vr.p3] = (p3Votes[vr.p3] || 0) + weight;
-    if (vr.p4 && vr.p4.length === 4) p4Votes[vr.p4] = (p4Votes[vr.p4] || 0) + weight;
+  for (const sr of summaryResults) {
+    // Frames that detected a summary board get 10x weight
+    const weight = sr.is_summary ? 10 : 1;
+    if (sr.p3 && sr.p3.length === 3) p3Votes[sr.p3] = (p3Votes[sr.p3] || 0) + weight;
+    if (sr.p4 && sr.p4.length === 4) p4Votes[sr.p4] = (p4Votes[sr.p4] || 0) + weight;
   }
-  const frameP3 = Object.entries(p3Votes).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
-  const frameP4 = Object.entries(p4Votes).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
-  log(`  🖼️  Frame Vote:  P3=${frameP3 || "?"} P4=${frameP4 || "?"}`);
-  log(`  🔊 Audio:       P3=${audioResult.p3 || "?"} P4=${audioResult.p4 || "?"}`);
 
-  // Agreement scoring: Full Video has highest authority
+  const summaryP3 = Object.entries(p3Votes).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+  const summaryP4 = Object.entries(p4Votes).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+  log(`  🖼️  Summary Board: P3=${summaryP3 || "?"} P4=${summaryP4 || "?"}`);
+
   let finalP3, finalP4, confidence;
 
-  // P3 resolution
-  const p3Sources = [fullVideoResult.p3, frameP3, audioResult.p3].filter(Boolean);
-  const p3Agreement = {};
-  p3Sources.forEach(v => { p3Agreement[v] = (p3Agreement[v] || 0) + 1; });
-  const p3Best = Object.entries(p3Agreement).sort((a, b) => b[1] - a[1])[0];
+  // ═══ DECISION LOGIC: Audio is the authority ═══
 
-  // P4 resolution
-  const p4Sources = [fullVideoResult.p4, frameP4, audioResult.p4].filter(Boolean);
-  const p4Agreement = {};
-  p4Sources.forEach(v => { p4Agreement[v] = (p4Agreement[v] || 0) + 1; });
-  const p4Best = Object.entries(p4Agreement).sort((a, b) => b[1] - a[1])[0];
-
-  // If 2+ channels agree, that's our answer
-  if (p3Best && p3Best[1] >= 2) {
-    finalP3 = p3Best[0];
-  } else {
-    // Trust Full Video over individual channels
-    finalP3 = fullVideoResult.p3 || frameP3 || audioResult.p3;
+  // CASE 1: Audio produced results (most common path)
+  if (audioResult.p3 && audioResult.p4) {
+    if (summaryP3 && summaryP4) {
+      // Both channels have data
+      if (audioResult.p3 === summaryP3 && audioResult.p4 === summaryP4) {
+        // PERFECT MATCH — highest confidence
+        finalP3 = audioResult.p3;
+        finalP4 = audioResult.p4;
+        confidence = "high";
+        log(`  ✅ PERFECT MATCH: Audio + Summary Board agree → HIGH confidence`);
+      } else {
+        // DISAGREEMENT — Audio wins (historically more reliable)
+        finalP3 = audioResult.p3;
+        finalP4 = audioResult.p4;
+        confidence = "high_audio_authority";
+        
+        // Log forensic details for each disagreement
+        if (audioResult.p3 !== summaryP3) {
+          log(`  ⚠️ P3 CONFLICT: Audio="${audioResult.p3}" vs Summary="${summaryP3}" → TRUSTING AUDIO`);
+          // Detect specific 6/9 conflicts
+          for (let i = 0; i < 3; i++) {
+            const a = audioResult.p3[i], s = (summaryP3 || "")[i];
+            if ((a === '6' && s === '9') || (a === '9' && s === '6')) {
+              log(`  🔥 6/9 CONFLICT at P3 digit ${i + 1}: Audio='${a}' Summary='${s}' → Audio WINS (phonetically unambiguous)`);
+            }
+          }
+        }
+        if (audioResult.p4 !== summaryP4) {
+          log(`  ⚠️ P4 CONFLICT: Audio="${audioResult.p4}" vs Summary="${summaryP4}" → TRUSTING AUDIO`);
+          for (let i = 0; i < 4; i++) {
+            const a = audioResult.p4[i], s = (summaryP4 || "")[i];
+            if ((a === '6' && s === '9') || (a === '9' && s === '6')) {
+              log(`  🔥 6/9 CONFLICT at P4 digit ${i + 1}: Audio='${a}' Summary='${s}' → Audio WINS (phonetically unambiguous)`);
+            }
+          }
+        }
+      }
+    } else {
+      // Only Audio has data — Summary Board failed or showed no board
+      finalP3 = audioResult.p3;
+      finalP4 = audioResult.p4;
+      confidence = "high_audio_only";
+      log(`  ✅ AUDIO ONLY: Summary Board had no usable data → Trusting audio (PRIMARY channel)`);
+    }
+  }
+  // CASE 2: Audio failed, but Summary Board has data
+  else if (summaryP3 && summaryP4) {
+    finalP3 = summaryP3;
+    finalP4 = summaryP4;
+    confidence = "medium_vision_only";
+    log(`  ⚠️ AUDIO FAILED: Using Summary Board as fallback → MEDIUM confidence`);
+  }
+  // CASE 3: Both channels failed
+  else {
+    finalP3 = audioResult.p3 || summaryP3;
+    finalP4 = audioResult.p4 || summaryP4;
+    confidence = "low";
+    log(`  ❌ BOTH CHANNELS WEAK: Partial/no data → LOW confidence`);
   }
 
-  if (p4Best && p4Best[1] >= 2) {
-    finalP4 = p4Best[0];
-  } else {
-    finalP4 = fullVideoResult.p4 || frameP4 || audioResult.p4;
-  }
-
-  // Confidence level
-  const p3Unanimous = p3Best && p3Best[1] === p3Sources.length && p3Sources.length >= 2;
-  const p4Unanimous = p4Best && p4Best[1] === p4Sources.length && p4Sources.length >= 2;
-
-  if (p3Unanimous && p4Unanimous) {
-    confidence = "high";
-  } else if ((p3Best && p3Best[1] >= 2) && (p4Best && p4Best[1] >= 2)) {
-    confidence = "high";
-  } else {
-    confidence = "medium";
-  }
-
-  log(`  ✅ CROSS-VALIDATED: P3=${finalP3 || "?"} P4=${finalP4 || "?"} [${confidence.toUpperCase()}]`);
+  log(`  🏆 FINAL: P3=${finalP3 || "?"} P4=${finalP4 || "?"} [${confidence.toUpperCase()}]`);
   return { p3: finalP3, p4: finalP4, confidence };
 }
 
-function findGoldFrame(frames, visionResults) {
-  const summaryIdx = visionResults.findIndex(r => r.is_summary);
-  if (summaryIdx !== -1) return frames[summaryIdx].path;
-  const resultsIdx = visionResults.findIndex(r => r.p3 && r.p4);
-  if (resultsIdx !== -1) return frames[resultsIdx].path;
-  const sweetSpot = frames.find(f => f.sec >= 36 && f.sec <= 45);
-  if (sweetSpot) return sweetSpot.path;
-  return frames[frames.length - 1]?.path;
-}
-
+// ═══════════════════════════════════════════════════════════════════════════
 // ─── Main Entry Point ───────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+
 async function analyzeVideo(videoUrl, videoId, videoTitle) {
+  log(`🎬 ═══════════════════════════════════════════════════════════════`);
   log(`🎬 PROCESANDO SORTEO: "${videoTitle}"`);
-  log(`🏗️  Pipeline v3.2 APEX: Parallel (FullVideo + Audio) → [Frames if needed] → Oracle`);
+  log(`🏗️  Pipeline v4 IRONCLAD: Audio (PRIMARY) + Summary Board (CONFIRMATION)`);
+  log(`🎬 ═══════════════════════════════════════════════════════════════`);
 
   const folderName = getFolderName(videoTitle);
   const folderPath = path.join(WORK_DIR, folderName);
@@ -619,95 +468,42 @@ async function analyzeVideo(videoUrl, videoId, videoTitle) {
   // Step 1: Download (FORCE fresh)
   const videoPath = await downloadVideo(videoUrl, videoId, folderPath);
 
-  // Step 2: Extract audio (fast, ~0.8s)
+  // Step 2: Extract audio + summary board frames (both fast, local ffmpeg)
+  log(`⚡ Extracting audio + summary board frames...`);
   const audioPath = extractAudio(videoPath, folderPath);
+  const summaryFrames = extractSummaryBoardFrames(videoPath, folderPath);
 
-  // ═══ PHASE 1: Primary Channels (Full Video + Audio) IN PARALLEL ═══
-  log(`⚡ Ejecutando Gemini FullVideo y Audio Transcription en paralelo...`);
-  const [fullVideoResult, audioResultOrNull] = await Promise.all([
-    analyzeFullVideoWithGemini(videoPath),
-    audioPath ? analyzeAudioWithGemini(audioPath).catch(e => {
-      log(`⚠️ Gemini Audio error: ${e.message}`);
-      return { p3: null, p4: null };
-    }) : Promise.resolve({ p3: null, p4: null })
-  ]);
-  const audioResult = audioResultOrNull || { p3: null, p4: null };
+  // Step 3: Analyze Audio + Summary Board IN PARALLEL (max efficiency)
+  log(`⚡ Analyzing Audio + Summary Board in parallel via Gemini...`);
+  const audioPromise = audioPath 
+    ? analyzeAudioWithGemini(audioPath).catch(e => {
+        log(`⚠️ Audio analysis error: ${e.message}`);
+        return { p3: null, p4: null };
+      }) 
+    : Promise.resolve({ p3: null, p4: null });
 
-  // Quick check: do primary channels agree?
-  const primaryAgree = (
-    fullVideoResult.p3 && fullVideoResult.p4 &&
-    audioResult.p3 && audioResult.p4 &&
-    fullVideoResult.p3 === audioResult.p3 &&
-    fullVideoResult.p4 === audioResult.p4
+  const summaryPromises = summaryFrames.map(f => 
+    analyzeSummaryBoardFrame(f.path, f.label).catch(e => {
+      log(`⚠️ Summary Board error on ${f.label}: ${e.message}`);
+      return { p3: null, p4: null, is_summary: false };
+    })
   );
 
-  let visionResults = [];
-  let strategicFrames = [];
-  let frames = [];
-  let goldFrame = null;
+  const [audioResult, ...summaryResults] = await Promise.all([audioPromise, ...summaryPromises]);
 
-  if (primaryAgree) {
-    log(`🎯 PRIMARY CHANNELS AGREE — Skipping full frame extraction (saving ~72s!)`);
-    // Extract a single quick cover frame for the push payload (e.g. at 48s)
-    const goldPath = path.join(folderPath, `frame_scan_48s.jpg`);
-    try {
-      execSync(`ffmpeg -i "${videoPath}" -ss 00:00:48 -vframes 1 -q:v 2 "${goldPath}" -y 2>&1`, { timeout: 10000 });
-      if (fs.existsSync(goldPath)) goldFrame = goldPath;
-    } catch(e) {
-      log(`⚠️ Failed to extract quick cover frame: ${e.message}`);
-    }
-  } else {
-    // ═══ PHASE 2: Frame Analysis (Tiebreaker) ═══
-    log(`⚠️ Primary channels disagree! Extrayendo frames completos como tiebreaker...`);
-    frames = extractDynamicFrames(videoPath, folderPath);
-    
-    strategicFrames = frames.filter(f =>
-      (f.sec >= 14 && f.sec <= 26) || // Pick 3 segment
-      (f.sec >= 26 && f.sec <= 40) || // Pick 4 segment
-      (f.sec >= 47 && f.sec <= 56)    // Summary board
-    );
-    log(`🖼️  Analyzing ${strategicFrames.length} strategic frames (of ${frames.length} total)...`);
+  // Step 4: Cross-Validate (Audio is authority)
+  const validated = crossValidate(audioResult, summaryResults);
 
-    for (const f of strategicFrames) {
-      try {
-        const res = await analyzeFrameWithGemini(f.path, f.label);
-        visionResults.push(res);
-      } catch (e) {
-        log(`⚠️ Gemini Vision error on ${f.label}: ${e.message}`);
-      }
-    }
-    
-    goldFrame = findGoldFrame(strategicFrames.length ? strategicFrames : frames, visionResults);
-  }
-
-  // ═══ CROSS-VALIDATION ═══
-  let validated = crossValidateAllChannels(fullVideoResult, visionResults, audioResult);
-
-  // ═══ ORACLE (Emergency only — when confidence is not HIGH) ═══
-  if (validated.confidence !== "high") {
-    log(`⚠️ Confidence is MEDIUM. Triggering EMERGENCY ORACLE (Gemini 2.5 Pro)...`);
-    try {
-      const oracleFrames = strategicFrames.length ? strategicFrames : frames.filter(f => f.sec >= 14 && f.sec <= 56);
-      const framesB64 = oracleFrames.length > 0 ? oracleFrames.map(f => fs.readFileSync(f.path).toString("base64")) : [];
-      const audioB64 = audioPath ? fs.readFileSync(audioPath).toString("base64") : null;
-      
-      const oracleResult = await analyzeOracleWithGeminiPro(framesB64, audioB64);
-      if (oracleResult.p3 && oracleResult.p4) {
-        validated.p3 = oracleResult.p3;
-        validated.p4 = oracleResult.p4;
-        validated.confidence = "high_oracle_validated";
-        log(`  🏆 ORACLE RESOLVED: P3=${validated.p3} P4=${validated.p4}`);
-      } else {
-        log(`  ⚠️ ORACLE could not resolve numbers firmly.`);
-      }
-    } catch (e) {
-      log(`  ⚠️ Oracle API Error: ${e.message}`);
-    }
-  }
+  // Gold frame: ONLY use if a Summary Board was actually detected by vision.
+  // If no summary board found, return null → monitor.js falls back to YouTube thumbnail.
+  const hasSummaryBoard = summaryResults.some(r => r.is_summary === true);
+  const goldFrame = hasSummaryBoard && summaryFrames.length > 0
+    ? summaryFrames[summaryFrames.length - 1].path 
+    : null;
 
   cleanupOldAnalyses();
 
-  return { ...validated, source: "bliss_forensic_pipeline_v3.2", folder: folderPath, goldFrame };
+  return { ...validated, source: "bliss_ironclad_v4", folder: folderPath, goldFrame };
 }
 
 module.exports = { analyzeVideo, cleanupAnalysis: cleanupOldAnalyses };
