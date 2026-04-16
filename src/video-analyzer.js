@@ -74,7 +74,7 @@ function cleanupOldAnalyses() {
 // ─── Step 1: Download Video (FORCE OVERWRITE) ───────────────────────────────
 async function downloadVideo(videoUrl, videoId, folderPath) {
   const mp4Path = path.join(folderPath, "source.mp4");
-  
+
   // CRITICAL: Delete any cached video to force fresh download
   if (fs.existsSync(mp4Path)) {
     log(`🗑️  Deleting cached video to force fresh download...`);
@@ -122,7 +122,7 @@ function extractSummaryBoardFrames(videoPath, folderPath) {
   // The Summary Board appears at the end of the video, typically 48-55s.
   // It's a PRINTED GRAPHIC with digital text — immune to 6/9 ball confusion.
   const timestamps = [48, 51, 54];
-  
+
   for (const sec of timestamps) {
     const framePath = path.join(folderPath, `frame_summary_${sec}s.jpg`);
     const timestamp = `00:00:${String(sec).padStart(2, "0")}`;
@@ -138,7 +138,7 @@ function extractSummaryBoardFrames(videoPath, folderPath) {
       log(`  ⚠️  Frame extraction at ${sec}s skipped.`);
     }
   }
-  
+
   log(`  ✅ Extracted ${frames.length} summary board frames`);
   return frames;
 }
@@ -171,7 +171,7 @@ async function analyzeAudioWithGemini(audioPath) {
   log(`🔊 PRIMARY CHANNEL: Audio Transcription (Ground Truth)...`);
   const key = getGeminiKey();
   const audioData = fs.readFileSync(audioPath).toString("base64");
-  
+
   const body = {
     contents: [{ parts: [{ text: AUDIO_PROMPT }, { inline_data: { mime_type: "audio/mpeg", data: audioData } }] }],
     generationConfig: { temperature: 0.1 }
@@ -276,14 +276,14 @@ function _geminiPostSingle(url, body) {
 function parseGeminiNumbers(response, source) {
   try {
     const parts = response?.candidates?.[0]?.content?.parts || [];
-    
+
     // Strategy 1: Find JSON in non-thinking parts (Gemini 2.5 uses thinking mode)
     let jsonText = null;
-    
+
     for (let i = parts.length - 1; i >= 0; i--) {
       const part = parts[i];
       if (part.thought) continue; // Skip thinking parts
-      
+
       const text = part.text || "";
       const match = text.match(/\{[^}]+\}/);
       if (match) {
@@ -291,7 +291,7 @@ function parseGeminiNumbers(response, source) {
         break;
       }
     }
-    
+
     // Strategy 2: Fallback — try ALL parts including thinking
     if (!jsonText) {
       for (const part of parts) {
@@ -307,12 +307,12 @@ function parseGeminiNumbers(response, source) {
     // Strategy 3: Plaintext fallback — extract numbers from non-JSON responses
     if (!jsonText) {
       const allText = parts.map(p => p.text || "").join(" ");
-      const preview = parts.map((p, i) => `part[${i}] thought=${!!p.thought} len=${(p.text||"").length}`).join(", ");
+      const preview = parts.map((p, i) => `part[${i}] thought=${!!p.thought} len=${(p.text || "").length}`).join(", ");
       log(`  🔍 [${source}] No JSON found. Parts: ${preview}`);
       log(`  🔍 [${source}] Attempting plaintext extraction from: "${allText.substring(0, 120)}"`);
       return extractNumbersFromPlaintext(allText, source);
     }
-    
+
     const p = JSON.parse(jsonText);
     return {
       p3: p.p3 ? String(p.p3).replace(/\D/g, "") : null,
@@ -402,7 +402,7 @@ function crossValidate(audioResult, summaryResults) {
         finalP3 = audioResult.p3;
         finalP4 = audioResult.p4;
         confidence = "high_audio_authority";
-        
+
         // Log forensic details for each disagreement
         if (audioResult.p3 !== summaryP3) {
           log(`  ⚠️ P3 CONFLICT: Audio="${audioResult.p3}" vs Summary="${summaryP3}" → TRUSTING AUDIO`);
@@ -475,14 +475,14 @@ async function analyzeVideo(videoUrl, videoId, videoTitle) {
 
   // Step 3: Analyze Audio + Summary Board IN PARALLEL (max efficiency)
   log(`⚡ Analyzing Audio + Summary Board in parallel via Gemini...`);
-  const audioPromise = audioPath 
+  const audioPromise = audioPath
     ? analyzeAudioWithGemini(audioPath).catch(e => {
-        log(`⚠️ Audio analysis error: ${e.message}`);
-        return { p3: null, p4: null };
-      }) 
+      log(`⚠️ Audio analysis error: ${e.message}`);
+      return { p3: null, p4: null };
+    })
     : Promise.resolve({ p3: null, p4: null });
 
-  const summaryPromises = summaryFrames.map(f => 
+  const summaryPromises = summaryFrames.map(f =>
     analyzeSummaryBoardFrame(f.path, f.label).catch(e => {
       log(`⚠️ Summary Board error on ${f.label}: ${e.message}`);
       return { p3: null, p4: null, is_summary: false };
@@ -494,12 +494,12 @@ async function analyzeVideo(videoUrl, videoId, videoTitle) {
   // Step 4: Cross-Validate (Audio is authority)
   const validated = crossValidate(audioResult, summaryResults);
 
-  // Gold frame: ONLY use if a Summary Board was actually detected by vision.
-  // If no summary board found, return null → monitor.js falls back to YouTube thumbnail.
-  const hasSummaryBoard = summaryResults.some(r => r.is_summary === true);
-  const goldFrame = hasSummaryBoard && summaryFrames.length > 0
-    ? summaryFrames[summaryFrames.length - 1].path 
-    : null;
+  // Gold frame: Prioritize AI-confirmed summary board. 
+  // Fallback: Always use the last frame (54s) if no confirmation, as it contains the board 99.9% of the time.
+  const confirmedIndex = summaryResults.findIndex(r => r.is_summary === true);
+  const goldFrame = confirmedIndex !== -1 
+    ? summaryFrames[confirmedIndex].path 
+    : (summaryFrames.length > 0 ? summaryFrames[summaryFrames.length - 1].path : null);
 
   cleanupOldAnalyses();
 
