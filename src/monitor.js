@@ -528,27 +528,43 @@ function log(msg) {
   fs.appendFileSync(logFile, line + "\n");
 }
 
+// ─── RSS Safety Net (runs every 5 min, NOT every poll) ──────────────────────
+let _lastRssMergeTime = 0;
+const RSS_SAFETY_NET_INTERVAL = 5 * 60 * 1000; // 5 minutes
+
 // ─── Main Poll Loop ─────────────────────────────────────────────────────────
 async function pollChannel() {
   log("🔍 Polling Florida Lottery YouTube channel...");
 
   try {
-    // 1. Try Direct Scrape First (Real-time)
+    // 1. HTML Scrape — PRIMARY, real-time (no delay)
     let videos = await fetchLatestVideosViaScrape();
 
-    // 2. ALWAYS merge RSS to guarantee Pick videos aren't missed by HTML scraper
-    try {
-      const xml = await fetchRSS(RSS_URL);
-      const rssVideos = parseRSSVideos(xml);
-      const existingIds = new Set(videos.map(v => v.id));
-      for (const rv of rssVideos) {
-        if (!existingIds.has(rv.id)) {
-          videos.push(rv);
+    // 2. RSS Fallback + periodic safety net
+    const now = Date.now();
+    const shouldMergeRss = videos.length === 0 || (now - _lastRssMergeTime > RSS_SAFETY_NET_INTERVAL);
+
+    if (shouldMergeRss) {
+      try {
+        if (videos.length === 0) log("ℹ️ Scrape found no videos, falling back to RSS...");
+        const xml = await fetchRSS(RSS_URL);
+        const rssVideos = parseRSSVideos(xml);
+        const existingIds = new Set(videos.map(v => v.id));
+        let merged = 0;
+        for (const rv of rssVideos) {
+          if (!existingIds.has(rv.id)) {
+            videos.push(rv);
+            merged++;
+          }
         }
-      }
-    } catch (rssErr) {
-      if (videos.length === 0) {
-        log(`⚠️ Both scrape and RSS failed: ${rssErr.message}`);
+        if (merged > 0 && videos.length > 0) {
+          log(`🔄 RSS safety net merged ${merged} additional video(s)`);
+        }
+        _lastRssMergeTime = now;
+      } catch (rssErr) {
+        if (videos.length === 0) {
+          log(`⚠️ Both scrape and RSS failed: ${rssErr.message}`);
+        }
       }
     }
 
