@@ -432,6 +432,10 @@ async function sendEmail(drawInfo, imagePath, videoUrl, videoTitle, extractedNum
       user: CONFIG.smtp.user,
       pass: CONFIG.smtp.pass,
     },
+    connectionTimeout: 30000,
+    greetingTimeout: 30000,
+    socketTimeout: 30000,
+    tls: { rejectUnauthorized: false },
   });
 
   const now = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
@@ -494,8 +498,22 @@ async function sendEmail(drawInfo, imagePath, videoUrl, videoTitle, extractedNum
       : [],
   };
 
-  await transporter.sendMail(mailOptions);
-  log(`📧 Email enviado con resultados: ${subject}`);
+  // Retry email up to 3 times with 5s backoff
+  const EMAIL_MAX_RETRIES = 3;
+  for (let attempt = 1; attempt <= EMAIL_MAX_RETRIES; attempt++) {
+    try {
+      await transporter.sendMail(mailOptions);
+      log(`📧 Email enviado con resultados: ${subject}`);
+      return;
+    } catch (emailErr) {
+      log(`⚠️ Email attempt ${attempt}/${EMAIL_MAX_RETRIES} failed: ${emailErr.message}`);
+      if (attempt < EMAIL_MAX_RETRIES) {
+        await new Promise(r => setTimeout(r, 5000 * attempt));
+      } else {
+        throw emailErr;
+      }
+    }
+  }
 }
 
 // ─── Logger ─────────────────────────────────────────────────────────────────
@@ -517,12 +535,21 @@ async function pollChannel() {
   try {
     // 1. Try Direct Scrape First (Real-time)
     let videos = await fetchLatestVideosViaScrape();
-    
-    // 2. If scrape failed or found nothing, fallback to RSS
-    if (videos.length === 0) {
-      log("ℹ️ Scrape found no videos, falling back to RSS...");
+
+    // 2. ALWAYS merge RSS to guarantee Pick videos aren't missed by HTML scraper
+    try {
       const xml = await fetchRSS(RSS_URL);
-      videos = parseRSSVideos(xml);
+      const rssVideos = parseRSSVideos(xml);
+      const existingIds = new Set(videos.map(v => v.id));
+      for (const rv of rssVideos) {
+        if (!existingIds.has(rv.id)) {
+          videos.push(rv);
+        }
+      }
+    } catch (rssErr) {
+      if (videos.length === 0) {
+        log(`⚠️ Both scrape and RSS failed: ${rssErr.message}`);
+      }
     }
 
     if (videos.length === 0) {
