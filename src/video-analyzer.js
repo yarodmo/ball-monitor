@@ -71,7 +71,7 @@ function cleanupOldAnalyses() {
   }
 }
 
-// ─── Step 1: Download Video (FORCE OVERWRITE) ───────────────────────────────
+// ─── Step 1: Download Video (RESILIENT — 3 retries, anti-throttle) ──────────
 async function downloadVideo(videoUrl, videoId, folderPath) {
   const mp4Path = path.join(folderPath, "source.mp4");
 
@@ -81,23 +81,59 @@ async function downloadVideo(videoUrl, videoId, folderPath) {
     fs.unlinkSync(mp4Path);
   }
 
-  log(`⬇️  Downloading video ${videoId} to ${mp4Path}...`);
-  try {
-    execSync(
-      `yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" ` +
-      `--merge-output-format mp4 --force-overwrites ` +
-      `--no-cache-dir ` +
-      `-o "${mp4Path}" "${videoUrl}" 2>&1`,
-      { timeout: 120000, stdio: "pipe" }
-    );
-  } catch (e) {
-    throw new Error(`yt-dlp download failed: ${e.message}`);
+  const MAX_RETRIES = 3;
+  const BACKOFF_MS = [10000, 30000, 60000]; // 10s, 30s, 60s
+
+  // Quality tiers: best first, degrade on retries to dodge throttling
+  const FORMAT_TIERS = [
+    `"bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"`,
+    `"bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]/best"`,
+    `"best[ext=mp4]/best"`,
+  ];
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    const format = FORMAT_TIERS[Math.min(attempt - 1, FORMAT_TIERS.length - 1)];
+    const timeout = 120000 + (attempt * 60000); // 180s, 240s, 300s
+
+    log(`⬇️  [Attempt ${attempt}/${MAX_RETRIES}] Downloading video ${videoId} to ${mp4Path}...`);
+    try {
+      execSync(
+        `yt-dlp -f ${format} ` +
+        `--merge-output-format mp4 --force-overwrites ` +
+        `--no-cache-dir --force-ipv4 ` +
+        `--socket-timeout 30 --retries 3 --fragment-retries 5 ` +
+        `--no-check-certificates ` +
+        `-o "${mp4Path}" "${videoUrl}" 2>&1`,
+        { timeout, stdio: "pipe" }
+      );
+
+      if (fs.existsSync(mp4Path)) {
+        const stats = fs.statSync(mp4Path);
+        log(`✅ Video downloaded: ${mp4Path} (${(stats.size / 1024 / 1024).toFixed(1)} MB)`);
+        return mp4Path;
+      }
+    } catch (e) {
+      log(`⚠️  Download attempt ${attempt}/${MAX_RETRIES} failed: ${e.message.substring(0, 120)}`);
+
+      // Clean up partial downloads
+      if (fs.existsSync(mp4Path)) {
+        try { fs.unlinkSync(mp4Path); } catch (_) {}
+      }
+      // Also clean .part files
+      const partFile = mp4Path + ".part";
+      if (fs.existsSync(partFile)) {
+        try { fs.unlinkSync(partFile); } catch (_) {}
+      }
+    }
+
+    if (attempt < MAX_RETRIES) {
+      const backoff = BACKOFF_MS[attempt - 1];
+      log(`⏳ Waiting ${backoff / 1000}s before retry...`);
+      await new Promise(r => setTimeout(r, backoff));
+    }
   }
 
-  if (!fs.existsSync(mp4Path)) throw new Error("Video download produced no file");
-  const stats = fs.statSync(mp4Path);
-  log(`✅ Video downloaded: ${mp4Path} (${(stats.size / 1024 / 1024).toFixed(1)} MB)`);
-  return mp4Path;
+  throw new Error(`yt-dlp download failed after ${MAX_RETRIES} attempts (all retries exhausted)`);
 }
 
 // ─── Step 2: Extract Audio ──────────────────────────────────────────────────
