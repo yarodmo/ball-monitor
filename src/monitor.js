@@ -428,6 +428,7 @@ async function sendEmail(drawInfo, imagePath, videoUrl, videoTitle, extractedNum
     host: CONFIG.smtp.host,
     port: CONFIG.smtp.port,
     secure: CONFIG.smtp.secure,
+    ignoreTLS: !CONFIG.smtp.secure,
     auth: {
       user: CONFIG.smtp.user,
       pass: CONFIG.smtp.pass,
