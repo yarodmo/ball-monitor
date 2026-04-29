@@ -69,7 +69,7 @@ const RSS_URL = `https://www.youtube.com/feeds/videos.xml?channel_id=${CHANNEL_I
  */
 function fetchLatestVideosViaScrape() {
   return new Promise((resolve, reject) => {
-    https.get(CHANNEL_VIDEOS_URL, {
+    const req = https.get(CHANNEL_VIDEOS_URL, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept-Language': 'en-US,en;q=0.9'
@@ -84,8 +84,7 @@ function fetchLatestVideosViaScrape() {
 
           const data = JSON.parse(match[1]);
           const videos = [];
-          
-          // YouTube renders content in deep nested structures
+
           const tabs = data.contents?.twoColumnBrowseResultsRenderer?.tabs;
           if (!tabs) return resolve([]);
 
@@ -106,10 +105,19 @@ function fetchLatestVideosViaScrape() {
           resolve(videos);
         } catch (err) {
           log(`⚠️ Scraping parse error: ${err.message}`);
-          resolve([]); // Fallback to RSS if scrape fails
+          resolve([]);
         }
       });
-    }).on("error", (err) => {
+    });
+
+    // 15s hard timeout — prevents socket hang up from stalling the monitor
+    req.setTimeout(15000, () => {
+      log('⚠️ Scrape request timed out (15s) — aborting');
+      req.destroy();
+      resolve([]);
+    });
+
+    req.on('error', (err) => {
       log(`⚠️ Scraping fetch error: ${err.message}`);
       resolve([]);
     });
@@ -569,10 +577,31 @@ async function pollChannel() {
       }
     }
 
+    // 3. yt-dlp EMERGENCY FALLBACK — fires only when both scrape AND RSS return nothing
     if (videos.length === 0) {
-      log("⚠️ No videos found in any source.");
+      log('🚨 Emergency fallback: using yt-dlp to fetch channel videos...');
+      try {
+        const { execSync } = require('child_process');
+        const raw = execSync(
+          `yt-dlp --flat-playlist --playlist-end 10 --print "%(id)s|%(title)s" --no-warnings "${CHANNEL_VIDEOS_URL}"`,
+          { timeout: 30000, encoding: 'utf8' }
+        );
+        for (const line of raw.trim().split('\n')) {
+          const [id, ...titleParts] = line.split('|');
+          const title = titleParts.join('|').trim();
+          if (id && title) videos.push({ id, title, url: `https://www.youtube.com/watch?v=${id}`, published: 'Recently' });
+        }
+        if (videos.length > 0) log(`🔧 yt-dlp emergency fallback found ${videos.length} videos`);
+      } catch (ytErr) {
+        log(`❌ yt-dlp emergency fallback also failed: ${ytErr.message}`);
+      }
+    }
+
+    if (videos.length === 0) {
+      log("⚠️ No videos found in any source (scrape + RSS + yt-dlp all failed).");
       return;
     }
+
 
     log(`📋 Found ${videos.length} videos in feed`);
     const state = loadState();
