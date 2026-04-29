@@ -473,12 +473,7 @@ async function sendEmail(drawInfo, imagePath, videoUrl, videoTitle, extractedNum
           </div>
         </div>
 
-        <p style="color: #94a3b8; font-size: 14px; margin-bottom: 20px;">
-          📺 Fuente: <a href="${videoUrl}" style="color: #38bdf8; text-decoration: none;">${videoTitle}</a>
-        </p>
-        
-        ${imagePath ? `<div style="margin-top: 10px;"><img src="cid:capture" style="width: 100%; border-radius: 12px; border: 1px solid #444;" /></div>` : ""}
-        
+
         <div style="margin-top: 30px; padding: 15px; background: #0f172a; border-radius: 8px; border-left: 4px solid #38bdf8;">
           <p style="margin: 0; color: #64748b; font-size: 12px; line-height: 1.6;">
             <strong>AUDITORÍA VERIFICADA:</strong> Este resultado ha sido verificado y sincronizado automáticamente por Ballbot.
@@ -496,15 +491,7 @@ async function sendEmail(drawInfo, imagePath, videoUrl, videoTitle, extractedNum
     to: CONFIG.recipients.join(", "),
     subject,
     html,
-    attachments: imagePath
-      ? [
-        {
-          filename: path.basename(imagePath),
-          path: imagePath,
-          cid: "capture",
-        },
-      ]
-      : [],
+    attachments: [],
   };
 
   // Retry email up to 3 times with 5s backoff

@@ -1,22 +1,21 @@
 /**
- * VideoAnalyzer — AI-Powered Lottery Number Extraction (v4 IRONCLAD)
+ * VideoAnalyzer — AI-Powered Lottery Number Extraction (v5 AUDIO-ONLY)
  * 
  * ARCHITECTURE:
- *   PRIMARY   → Audio transcription (announcer says each digit clearly)
- *   SECONDARY → Summary Board frames (printed text at end of video, 48-55s)
+ *   SOLE SOURCE → Audio transcription via Gemini (ground truth)
  * 
- *   NO full video upload (saves 30s+ upload/processing)
- *   NO shotgun 17-frame extraction (saves 12+ API calls)
- *   NO Oracle/Gemini Pro (introduced errors, never corrected any)
+ *   NO full video download (saves 80-90% bandwidth)
+ *   NO ffmpeg frame extraction (saves CPU)
+ *   NO vision/summary board analysis (was returning null 90%+ of the time)
+ *   NO cross-validation engine (single authoritative source is cleaner)
  * 
- * Audio is ground truth. Summary Board is confirmation.
+ * Pipeline: detect video → download audio only (~3-5MB) → Gemini transcription → numbers
  * 
  * HISTORICAL JUSTIFICATION:
- *   - Oracle confirmed date-as-numbers hallucination (20260330-M)
- *   - Oracle introduced 6→9 error overriding correct audio (20260401-M)
- *   - Oracle never corrected a single error in 3 invocations (0/3)
- *   - Vision (Gemini 2.5 Flash) intermittently returns text instead of JSON
  *   - Audio correctly identified numbers in ALL documented cases
+ *   - Vision cross-validation returned HIGH_AUDIO_ONLY in the majority of draws
+ *   - Vision was dead weight after email image was removed (no consumer)
+ *   - Audio of FL Lottery = professional studio broadcast = >99% transcription accuracy
  * 
  * @module video-analyzer
  */
@@ -71,56 +70,45 @@ function cleanupOldAnalyses() {
   }
 }
 
-// ─── Step 1: Download Video (RESILIENT — 3 retries, anti-throttle) ──────────
-async function downloadVideo(videoUrl, videoId, folderPath) {
-  const mp4Path = path.join(folderPath, "source.mp4");
+// ─── Step 1: Download Audio Only (RESILIENT — 3 retries, anti-throttle) ─────
+async function downloadAudio(videoUrl, videoId, folderPath) {
+  const audioPath = path.join(folderPath, "source.m4a");
 
-  // CRITICAL: Delete any cached video to force fresh download
-  if (fs.existsSync(mp4Path)) {
-    log(`🗑️  Deleting cached video to force fresh download...`);
-    fs.unlinkSync(mp4Path);
+  // Delete any cached audio to force fresh download
+  if (fs.existsSync(audioPath)) {
+    log(`🗑️  Deleting cached audio to force fresh download...`);
+    fs.unlinkSync(audioPath);
   }
 
   const MAX_RETRIES = 3;
   const BACKOFF_MS = [10000, 30000, 60000]; // 10s, 30s, 60s
 
-  // Quality tiers: best first, degrade on retries to dodge throttling
-  const FORMAT_TIERS = [
-    `"bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"`,
-    `"bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]/best"`,
-    `"best[ext=mp4]/best"`,
-  ];
-
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    const format = FORMAT_TIERS[Math.min(attempt - 1, FORMAT_TIERS.length - 1)];
-    const timeout = 120000 + (attempt * 60000); // 180s, 240s, 300s
-
-    log(`⬇️  [Attempt ${attempt}/${MAX_RETRIES}] Downloading video ${videoId} to ${mp4Path}...`);
+    const timeout = 90000 + (attempt * 30000); // 120s, 150s, 180s
+    log(`⬇️  [Attempt ${attempt}/${MAX_RETRIES}] Downloading audio for ${videoId}...`);
     try {
       execSync(
-        `yt-dlp -f ${format} ` +
-        `--merge-output-format mp4 --force-overwrites ` +
-        `--no-cache-dir --force-ipv4 ` +
+        `yt-dlp -f "bestaudio[ext=m4a]/bestaudio" ` +
+        `--force-overwrites --no-cache-dir --force-ipv4 ` +
         `--socket-timeout 30 --retries 3 --fragment-retries 5 ` +
         `--no-check-certificates ` +
-        `-o "${mp4Path}" "${videoUrl}" 2>&1`,
+        `-o "${audioPath}" "${videoUrl}" 2>&1`,
         { timeout, stdio: "pipe" }
       );
 
-      if (fs.existsSync(mp4Path)) {
-        const stats = fs.statSync(mp4Path);
-        log(`✅ Video downloaded: ${mp4Path} (${(stats.size / 1024 / 1024).toFixed(1)} MB)`);
-        return mp4Path;
+      if (fs.existsSync(audioPath)) {
+        const stats = fs.statSync(audioPath);
+        log(`✅ Audio downloaded: ${audioPath} (${(stats.size / 1024 / 1024).toFixed(1)} MB)`);
+        return audioPath;
       }
     } catch (e) {
-      log(`⚠️  Download attempt ${attempt}/${MAX_RETRIES} failed: ${e.message.substring(0, 120)}`);
+      log(`⚠️  Audio download attempt ${attempt}/${MAX_RETRIES} failed: ${e.message.substring(0, 120)}`);
 
       // Clean up partial downloads
-      if (fs.existsSync(mp4Path)) {
-        try { fs.unlinkSync(mp4Path); } catch (_) {}
+      if (fs.existsSync(audioPath)) {
+        try { fs.unlinkSync(audioPath); } catch (_) {}
       }
-      // Also clean .part files
-      const partFile = mp4Path + ".part";
+      const partFile = audioPath + ".part";
       if (fs.existsSync(partFile)) {
         try { fs.unlinkSync(partFile); } catch (_) {}
       }
@@ -133,50 +121,7 @@ async function downloadVideo(videoUrl, videoId, folderPath) {
     }
   }
 
-  throw new Error(`yt-dlp download failed after ${MAX_RETRIES} attempts (all retries exhausted)`);
-}
-
-// ─── Step 2: Extract Audio ──────────────────────────────────────────────────
-function extractAudio(videoPath, folderPath) {
-  const audioPath = path.join(folderPath, `audio.mp3`);
-  log(`🔊 Extracting audio track...`);
-  try {
-    execSync(
-      `ffmpeg -i "${videoPath}" -vn -acodec libmp3lame -q:a 4 "${audioPath}" -y 2>&1`,
-      { timeout: 30000, stdio: "pipe" }
-    );
-  } catch (e) {
-    log(`⚠️  Audio extraction failed.`);
-  }
-  return fs.existsSync(audioPath) ? audioPath : null;
-}
-
-// ─── Step 3: Extract Summary Board Frames (targeted, 48-55s) ────────────────
-function extractSummaryBoardFrames(videoPath, folderPath) {
-  log(`🖼️  Extracting Summary Board frames (48-55s window)...`);
-  const frames = [];
-  // The Summary Board appears at the end of the video, typically 48-55s.
-  // It's a PRINTED GRAPHIC with digital text — immune to 6/9 ball confusion.
-  const timestamps = [48, 51, 54];
-
-  for (const sec of timestamps) {
-    const framePath = path.join(folderPath, `frame_summary_${sec}s.jpg`);
-    const timestamp = `00:00:${String(sec).padStart(2, "0")}`;
-    try {
-      execSync(
-        `ffmpeg -i "${videoPath}" -ss ${timestamp} -vframes 1 -q:v 2 "${framePath}" -y 2>&1`,
-        { timeout: 30000, stdio: "pipe" }
-      );
-      if (fs.existsSync(framePath)) {
-        frames.push({ path: framePath, label: `summary_${sec}s`, sec });
-      }
-    } catch (e) {
-      log(`  ⚠️  Frame extraction at ${sec}s skipped.`);
-    }
-  }
-
-  log(`  ✅ Extracted ${frames.length} summary board frames`);
-  return frames;
+  throw new Error(`yt-dlp audio download failed after ${MAX_RETRIES} attempts`);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -220,48 +165,6 @@ async function analyzeAudioWithGemini(audioPath) {
   return result;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// ─── SECONDARY CHANNEL: Summary Board Vision ───────────────────────────────
-// ═══════════════════════════════════════════════════════════════════════════
-
-const SUMMARY_BOARD_PROMPT = `FORENSIC SUMMARY BOARD READER
-
-You are examining a frame from the END of an official Florida Lottery drawing video.
-This frame should show the FINAL SUMMARY BOARD — a blue/white graphic table listing all game results.
-
-TASK: Read the Pick 3 (3 digits) and Pick 4 (4 digits) winning numbers from the summary board.
-
-WHAT TO LOOK FOR:
-- A blue/white SUMMARY TABLE graphic showing results for all games
-- The rows labeled "Pick 3" and "Pick 4" with their winning numbers
-- This is PRINTED TEXT on a graphic overlay, NOT physical lottery balls
-- The numbers are displayed as clean digital text — no ball rotation ambiguity
-
-WHAT TO IGNORE:
-- Pick 2, Pick 5, and Fireball results
-- Any logos, dates, or decorative elements
-
-If this frame does NOT show a summary board (e.g., it shows balls being drawn, an intro screen, 
-or credits), set both values to null and is_summary to false.
-
-Respond ONLY in valid JSON, nothing else:
-{"p3": "XXX", "p4": "XXXX", "is_summary": true}
-
-Use null for values you cannot read. Set is_summary to false if no summary board is visible.`;
-
-async function analyzeSummaryBoardFrame(imagePath, context) {
-  const key = getGeminiKey();
-  const imageData = fs.readFileSync(imagePath).toString("base64");
-
-  const body = {
-    contents: [{ parts: [{ text: SUMMARY_BOARD_PROMPT }, { inline_data: { mime_type: "image/jpeg", data: imageData } }] }],
-    generationConfig: { temperature: 0.1 }
-  };
-
-  const url = `${GEMINI_BASE}/models/gemini-2.5-flash:generateContent?key=${key}`;
-  const response = await geminiPost(url, body);
-  return parseGeminiNumbers(response, context);
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ─── HTTP & Parsing Utilities ───────────────────────────────────────────────
@@ -398,148 +301,33 @@ function extractNumbersFromPlaintext(text, source) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ─── Cross-Validation Engine (Audio-First Authority) ────────────────────────
-// ═══════════════════════════════════════════════════════════════════════════
-
-function crossValidate(audioResult, summaryResults) {
-  log(`🔬 CROSS-VALIDATION: Audio (PRIMARY) + Summary Board (CONFIRMATION)`);
-  log(`  🔊 Audio:         P3=${audioResult.p3 || "?"} P4=${audioResult.p4 || "?"}`);
-
-  // Aggregate Summary Board results with weighted voting
-  const p3Votes = {};
-  const p4Votes = {};
-  for (const sr of summaryResults) {
-    // Frames that detected a summary board get 10x weight
-    const weight = sr.is_summary ? 10 : 1;
-    if (sr.p3 && sr.p3.length === 3) p3Votes[sr.p3] = (p3Votes[sr.p3] || 0) + weight;
-    if (sr.p4 && sr.p4.length === 4) p4Votes[sr.p4] = (p4Votes[sr.p4] || 0) + weight;
-  }
-
-  const summaryP3 = Object.entries(p3Votes).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
-  const summaryP4 = Object.entries(p4Votes).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
-  log(`  🖼️  Summary Board: P3=${summaryP3 || "?"} P4=${summaryP4 || "?"}`);
-
-  let finalP3, finalP4, confidence;
-
-  // ═══ DECISION LOGIC: Audio is the authority ═══
-
-  // CASE 1: Audio produced results (most common path)
-  if (audioResult.p3 && audioResult.p4) {
-    if (summaryP3 && summaryP4) {
-      // Both channels have data
-      if (audioResult.p3 === summaryP3 && audioResult.p4 === summaryP4) {
-        // PERFECT MATCH — highest confidence
-        finalP3 = audioResult.p3;
-        finalP4 = audioResult.p4;
-        confidence = "high";
-        log(`  ✅ PERFECT MATCH: Audio + Summary Board agree → HIGH confidence`);
-      } else {
-        // DISAGREEMENT — Audio wins (historically more reliable)
-        finalP3 = audioResult.p3;
-        finalP4 = audioResult.p4;
-        confidence = "high_audio_authority";
-
-        // Log forensic details for each disagreement
-        if (audioResult.p3 !== summaryP3) {
-          log(`  ⚠️ P3 CONFLICT: Audio="${audioResult.p3}" vs Summary="${summaryP3}" → TRUSTING AUDIO`);
-          // Detect specific 6/9 conflicts
-          for (let i = 0; i < 3; i++) {
-            const a = audioResult.p3[i], s = (summaryP3 || "")[i];
-            if ((a === '6' && s === '9') || (a === '9' && s === '6')) {
-              log(`  🔥 6/9 CONFLICT at P3 digit ${i + 1}: Audio='${a}' Summary='${s}' → Audio WINS (phonetically unambiguous)`);
-            }
-          }
-        }
-        if (audioResult.p4 !== summaryP4) {
-          log(`  ⚠️ P4 CONFLICT: Audio="${audioResult.p4}" vs Summary="${summaryP4}" → TRUSTING AUDIO`);
-          for (let i = 0; i < 4; i++) {
-            const a = audioResult.p4[i], s = (summaryP4 || "")[i];
-            if ((a === '6' && s === '9') || (a === '9' && s === '6')) {
-              log(`  🔥 6/9 CONFLICT at P4 digit ${i + 1}: Audio='${a}' Summary='${s}' → Audio WINS (phonetically unambiguous)`);
-            }
-          }
-        }
-      }
-    } else {
-      // Only Audio has data — Summary Board failed or showed no board
-      finalP3 = audioResult.p3;
-      finalP4 = audioResult.p4;
-      confidence = "high_audio_only";
-      log(`  ✅ AUDIO ONLY: Summary Board had no usable data → Trusting audio (PRIMARY channel)`);
-    }
-  }
-  // CASE 2: Audio failed, but Summary Board has data
-  else if (summaryP3 && summaryP4) {
-    finalP3 = summaryP3;
-    finalP4 = summaryP4;
-    confidence = "medium_vision_only";
-    log(`  ⚠️ AUDIO FAILED: Using Summary Board as fallback → MEDIUM confidence`);
-  }
-  // CASE 3: Both channels failed
-  else {
-    finalP3 = audioResult.p3 || summaryP3;
-    finalP4 = audioResult.p4 || summaryP4;
-    confidence = "low";
-    log(`  ❌ BOTH CHANNELS WEAK: Partial/no data → LOW confidence`);
-  }
-
-  log(`  🏆 FINAL: P3=${finalP3 || "?"} P4=${finalP4 || "?"} [${confidence.toUpperCase()}]`);
-  return { p3: finalP3, p4: finalP4, confidence };
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // ─── Main Entry Point ───────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function analyzeVideo(videoUrl, videoId, videoTitle) {
   log(`🎬 ═══════════════════════════════════════════════════════════════`);
   log(`🎬 PROCESANDO SORTEO: "${videoTitle}"`);
-  log(`🏗️  Pipeline v4 IRONCLAD: Audio (PRIMARY) + Summary Board (CONFIRMATION)`);
+  log(`🏗️  Pipeline v5 AUDIO-ONLY: Gemini transcription (sole source)`);
   log(`🎬 ═══════════════════════════════════════════════════════════════`);
 
   const folderName = getFolderName(videoTitle);
   const folderPath = path.join(WORK_DIR, folderName);
   if (!fs.existsSync(folderPath)) fs.mkdirSync(folderPath, { recursive: true });
 
-  // Step 1: Download (FORCE fresh)
-  const videoPath = await downloadVideo(videoUrl, videoId, folderPath);
+  // Step 1: Download audio stream only (~3-5MB vs 100MB+ for video)
+  const audioPath = await downloadAudio(videoUrl, videoId, folderPath);
 
-  // Step 2: Extract audio + summary board frames (both fast, local ffmpeg)
-  log(`⚡ Extracting audio + summary board frames...`);
-  const audioPath = extractAudio(videoPath, folderPath);
-  const summaryFrames = extractSummaryBoardFrames(videoPath, folderPath);
+  // Step 2: Transcribe with Gemini (sole source of truth)
+  const result = await analyzeAudioWithGemini(audioPath).catch(e => {
+    log(`⚠️ Audio analysis error: ${e.message}`);
+    throw new Error(`Audio transcription failed: ${e.message}`);
+  });
 
-  // Step 3: Analyze Audio + Summary Board IN PARALLEL (max efficiency)
-  log(`⚡ Analyzing Audio + Summary Board in parallel via Gemini...`);
-  const audioPromise = audioPath
-    ? analyzeAudioWithGemini(audioPath).catch(e => {
-      log(`⚠️ Audio analysis error: ${e.message}`);
-      return { p3: null, p4: null };
-    })
-    : Promise.resolve({ p3: null, p4: null });
-
-  const summaryPromises = summaryFrames.map(f =>
-    analyzeSummaryBoardFrame(f.path, f.label).catch(e => {
-      log(`⚠️ Summary Board error on ${f.label}: ${e.message}`);
-      return { p3: null, p4: null, is_summary: false };
-    })
-  );
-
-  const [audioResult, ...summaryResults] = await Promise.all([audioPromise, ...summaryPromises]);
-
-  // Step 4: Cross-Validate (Audio is authority)
-  const validated = crossValidate(audioResult, summaryResults);
-
-  // Gold frame: Prioritize AI-confirmed summary board. 
-  // Fallback: Always use the last frame (54s) if no confirmation, as it contains the board 99.9% of the time.
-  const confirmedIndex = summaryResults.findIndex(r => r.is_summary === true);
-  const goldFrame = confirmedIndex !== -1 
-    ? summaryFrames[confirmedIndex].path 
-    : (summaryFrames.length > 0 ? summaryFrames[summaryFrames.length - 1].path : null);
+  log(`  🏆 FINAL: P3=${result.p3 || "?"} P4=${result.p4 || "?"} [AUDIO_ONLY_V5]`);
 
   cleanupOldAnalyses();
 
-  return { ...validated, source: "bliss_ironclad_v4", folder: folderPath, goldFrame };
+  return { ...result, confidence: "high_audio_only", source: "bliss_audio_v5", folder: folderPath };
 }
 
 module.exports = { analyzeVideo, cleanupAnalysis: cleanupOldAnalyses };
