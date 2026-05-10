@@ -17,6 +17,7 @@ const https = require("https");
 const http = require("http");
 const url = require("url");
 const { analyzeVideo, cleanupAnalysis } = require("./video-analyzer");
+const { publishToSocial } = require("./social-publisher");
 
 // ─── Environment & Config ──────────────────────────────────────────────────
 require("dotenv").config();
@@ -27,6 +28,9 @@ if (process.env.GEMINI_API_KEY) CONFIG.gemini_api_key = process.env.GEMINI_API_K
 if (process.env.DATABASE_URL) CONFIG.database_url = process.env.DATABASE_URL;
 if (process.env.WEBHOOK_URL) CONFIG.webhook_url = process.env.WEBHOOK_URL;
 if (process.env.WEBHOOK_SECRET) CONFIG.webhook_secret = process.env.WEBHOOK_SECRET;
+
+// Meta / Social Publisher (env only — never stored in config.json)
+// These are read directly by social-publisher.js from process.env
 
 // SMTP Overrides
 if (process.env.SMTP_HOST) CONFIG.smtp.host = process.env.SMTP_HOST;
@@ -429,7 +433,7 @@ function cleanOldCaptures() {
 }
 
 // ─── Email via Nodemailer ───────────────────────────────────────────────────
-async function sendEmail(drawInfo, imagePath, videoUrl, videoTitle, extractedNumbers) {
+async function sendEmail(drawInfo, videoUrl, videoTitle, extractedNumbers) {
   const nodemailer = require("nodemailer");
 
   const transporter = nodemailer.createTransport({
@@ -626,23 +630,24 @@ async function pollChannel() {
           log(`❌ notifyBallbot error: ${e.message}`);
         }
 
-        // ── Step 2: Capture frame for email ──
-        let imagePath = extractedNumbers?.goldFrame || null;
-        if (!imagePath) {
-          try {
-            imagePath = await captureFrame(video.url, video.id);
-          } catch (e) {
-            log(`⚠️  Frame capture failed: ${e.message}`);
-          }
-        }
-
-        // ── Step 3: Send email notification ──
+        // ── Step 2: Send email notification ──
         try {
           if (CONFIG.smtp && CONFIG.smtp.user && CONFIG.smtp.user !== "TU_EMAIL@gmail.com") {
-            await sendEmail(draw, imagePath, video.url, video.title, extractedNumbers);
+            await sendEmail(draw, video.url, video.title, extractedNumbers);
           }
         } catch (e) {
           log(`❌ Email failed: ${e.message}`);
+        }
+
+        // ── Step 4: Publish to social media (same level as email & webhook) ──
+        try {
+          await publishToSocial({
+            drawInfo: draw,
+            extractedNumbers,
+            videoTitle: video.title,
+          });
+        } catch (e) {
+          log(`❌ Social publish failed: ${e.message}`);
         }
       } else {
         log(`⚠️  No period mapped for "${draw.type}" — notifications skipped`);
@@ -707,8 +712,10 @@ function startStatusServer() {
 // ─── Smart Window Polling ───────────────────────────────────────────────────
 // Normal mode: every CONFIG.poll_interval_ms (default 120s)
 // APEX Draw window: every 10s when close to expected YouTube upload time
-//   Midday window:  13:31–13:55 ET  (draw 13:30, video usually posted 13:33–13:45)
-//   Evening window: 21:46–22:05 ET  (draw 21:45, video usually posted 21:48–22:00)
+//   Midday window:  13:31–14:05 ET  (draw 13:30, video usually posted 13:33–13:50)
+//   Evening window: 21:46–22:20 ET  (draw 21:45, video usually posted 21:48–22:10)
+//   NOTE: Windows are intentionally wide to absorb YouTube upload delays.
+//   The Sniper Kill-Switch deactivates aggressive polling the moment a draw is captured.
 
 const WINDOW_INTERVAL_MS = 10_000; // 10 seconds for APEX Instant-Hit detection
 const SNIPE_COOLDOWN_MS = 2 * 60 * 60 * 1000; // 2 hours cooldown after a successful hit
@@ -719,11 +726,11 @@ function isInDrawWindow() {
   const et = new Date(etStr);
   const totalMin = et.getHours() * 60 + et.getMinutes();
   
-  // Midday Window: Starts 13:31 (ultra-anticipation) until 13:55
-  const middayWindow = totalMin >= 13 * 60 + 31 && totalMin <= 13 * 60 + 55;
+  // Midday Window: 13:31–14:05 ET (extended +10min to absorb late uploads)
+  const middayWindow = totalMin >= 13 * 60 + 31 && totalMin <= 14 * 60 + 5;
   
-  // Evening Window: Starts 21:46 (ultra-anticipation) until 22:05
-  const eveningWindow = totalMin >= 21 * 60 + 46 && totalMin <= 22 * 60 + 5;
+  // Evening Window: 21:46–22:20 ET (extended +15min — tonight FL posted at 22:00)
+  const eveningWindow = totalMin >= 21 * 60 + 46 && totalMin <= 22 * 60 + 20;
   
   const inTimeWindow = middayWindow || eveningWindow;
 
