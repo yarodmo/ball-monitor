@@ -68,65 +68,45 @@ const CHANNEL_VIDEOS_URL = `https://www.youtube.com/@FloridaLottery/videos`;
 const RSS_URL = `https://www.youtube.com/feeds/videos.xml?channel_id=${CHANNEL_ID}`;
 
 /**
- * Fetches latest videos by scraping the channel's /videos page.
- * This is MUCH faster than RSS (near real-time).
+ * PRIMARY DETECTOR: Fetches latest videos via yt-dlp.
+ * 
+ * WHY yt-dlp IS THE PRIMARY SOURCE (not HTML scraping):
+ *  - Zero cache delay — detects videos within seconds of YouTube publication
+ *  - Maintained extractors: works against YouTube anti-bot automatically
+ *  - HTML scraper was returning 0 results consistently (ytInitialData structure changes)
+ *  - RSS has 8-12 min propagation delay (confirmed 2026-05-09 Evening incident)
+ * 
+ * yt-dlp queries YouTube's internal API (innertube) directly — same source
+ * YouTube uses for its own apps. No HTML parsing fragility.
  */
-function fetchLatestVideosViaScrape() {
-  return new Promise((resolve, reject) => {
-    const req = https.get(CHANNEL_VIDEOS_URL, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9'
+async function fetchLatestVideosViaScrape() {
+  const { execSync } = require('child_process');
+  try {
+    const raw = execSync(
+      `yt-dlp --flat-playlist --playlist-end 8 --print "%(id)s|%(title)s" --no-warnings --force-ipv4 --socket-timeout 15 "${CHANNEL_VIDEOS_URL}"`,
+      { timeout: 20000, encoding: 'utf8' }
+    );
+    const videos = [];
+    for (const line of raw.trim().split('\n')) {
+      const [id, ...titleParts] = line.split('|');
+      const title = titleParts.join('|').trim();
+      if (id && title) {
+        videos.push({
+          id,
+          title,
+          url: `https://www.youtube.com/watch?v=${id}`,
+          published: 'Recently'
+        });
       }
-    }, (res) => {
-      let html = "";
-      res.on("data", (chunk) => (html += chunk));
-      res.on("end", () => {
-        try {
-          const match = html.match(/var ytInitialData = ({.*?});<\/script>/);
-          if (!match) return resolve([]);
-
-          const data = JSON.parse(match[1]);
-          const videos = [];
-
-          const tabs = data.contents?.twoColumnBrowseResultsRenderer?.tabs;
-          if (!tabs) return resolve([]);
-
-          const videosTab = tabs.find(t => t.tabRenderer?.title === 'Videos' || t.tabRenderer?.endpoint?.browseEndpoint?.params?.includes('Egl2aWRlb3'));
-          const contents = videosTab?.tabRenderer?.content?.richGridRenderer?.contents || [];
-
-          for (const item of contents) {
-            const v = item.richItemRenderer?.content?.videoRenderer;
-            if (v && v.videoId) {
-              videos.push({
-                id: v.videoId,
-                title: v.title.runs[0].text,
-                url: `https://www.youtube.com/watch?v=${v.videoId}`,
-                published: v.publishedTimeText?.simpleText || 'Recently'
-              });
-            }
-          }
-          resolve(videos);
-        } catch (err) {
-          log(`⚠️ Scraping parse error: ${err.message}`);
-          resolve([]);
-        }
-      });
-    });
-
-    // 15s hard timeout — prevents socket hang up from stalling the monitor
-    req.setTimeout(15000, () => {
-      log('⚠️ Scrape request timed out (15s) — aborting');
-      req.destroy();
-      resolve([]);
-    });
-
-    req.on('error', (err) => {
-      log(`⚠️ Scraping fetch error: ${err.message}`);
-      resolve([]);
-    });
-  });
+    }
+    if (videos.length > 0) log(`✅ yt-dlp primary: found ${videos.length} videos`);
+    return videos;
+  } catch (err) {
+    log(`⚠️ yt-dlp primary failed: ${err.message.substring(0, 80)} — falling back to RSS`);
+    return [];
+  }
 }
+
 
 function fetchRSS(url) {
   return new Promise((resolve, reject) => {
