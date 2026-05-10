@@ -568,23 +568,41 @@ async function pollChannel() {
       }
     }
 
-    // 3. yt-dlp EMERGENCY FALLBACK — fires only when both scrape AND RSS return nothing
-    if (videos.length === 0) {
-      log('🚨 Emergency fallback: using yt-dlp to fetch channel videos...');
+    // 3. yt-dlp DUAL PROBE — always runs during Draw Window (zero cache delay)
+    // ROOT CAUSE FIX (2026-05-09): HTML scraper was returning 0 videos, RSS has
+    // 8-12 min propagation delay. yt-dlp queries YouTube directly with NO cache.
+    // Tonight: FL Lottery published at 9:50 PM, RSS didn't reflect it until 10:00 PM.
+    // yt-dlp would have found it instantly. Now it runs every Draw Window poll.
+    const inWindowNow = isInDrawWindow();
+    const shouldRunYtDlp = videos.length === 0 || inWindowNow;
+
+    if (shouldRunYtDlp) {
+      if (videos.length === 0) {
+        log('🚨 Emergency probe: scrape+RSS both empty — using yt-dlp...');
+      } else {
+        log('⚡ Draw Window: running yt-dlp parallel probe (bypasses RSS cache)...');
+      }
       try {
         const { execSync } = require('child_process');
         const raw = execSync(
-          `yt-dlp --flat-playlist --playlist-end 10 --print "%(id)s|%(title)s" --no-warnings "${CHANNEL_VIDEOS_URL}"`,
-          { timeout: 30000, encoding: 'utf8' }
+          `yt-dlp --flat-playlist --playlist-end 5 --print "%(id)s|%(title)s" --no-warnings --force-ipv4 "${CHANNEL_VIDEOS_URL}"`,
+          { timeout: 20000, encoding: 'utf8' }
         );
+        const existingIds = new Set(videos.map(v => v.id));
+        let ytNew = 0;
         for (const line of raw.trim().split('\n')) {
           const [id, ...titleParts] = line.split('|');
           const title = titleParts.join('|').trim();
-          if (id && title) videos.push({ id, title, url: `https://www.youtube.com/watch?v=${id}`, published: 'Recently' });
+          if (id && title && !existingIds.has(id)) {
+            videos.push({ id, title, url: `https://www.youtube.com/watch?v=${id}`, published: 'Recently' });
+            existingIds.add(id);
+            ytNew++;
+          }
         }
-        if (videos.length > 0) log(`🔧 yt-dlp emergency fallback found ${videos.length} videos`);
+        if (ytNew > 0) log(`🔧 yt-dlp probe found ${ytNew} new video(s) not yet in RSS`);
+        else if (inWindowNow) log(`✅ yt-dlp probe: no new videos beyond RSS`);
       } catch (ytErr) {
-        log(`❌ yt-dlp emergency fallback also failed: ${ytErr.message}`);
+        log(`⚠️ yt-dlp probe failed: ${ytErr.message.substring(0, 80)}`);
       }
     }
 
