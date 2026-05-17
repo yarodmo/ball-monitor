@@ -29,6 +29,11 @@ const META_CONFIG = {
   ctaText: process.env.BALLBOT_CTA_TEXT || "Estrategias en tiempo real → app.ballbot.tel",
 };
 
+const TELEGRAM_CONFIG = {
+  botToken: process.env.TELEGRAM_BOT_TOKEN || "",
+  channelId: process.env.TELEGRAM_CHANNEL_ID || "@BallBotme",
+};
+
 // ─── Logger (reuse monitor's pattern) ────────────────────────────────────────
 function log(msg) {
   const ts = new Date().toISOString();
@@ -421,6 +426,90 @@ async function postToInstagram(imageBuffer, message) {
   }
 }
 
+// ─── Telegram Channel Post ──────────────────────────────────────────────────
+/**
+ * Sends the branded PNG + caption to the Telegram channel via Bot API sendPhoto.
+ * The bot must be an admin of the channel with "Post Messages" permission.
+ *
+ * @param {Buffer} imageBuffer - PNG image buffer
+ * @param {string} message - Caption text (Telegram supports up to 1024 chars for photos)
+ * @returns {Promise<object|null>} Telegram API response or null on failure
+ */
+async function postToTelegram(imageBuffer, message) {
+  if (!TELEGRAM_CONFIG.botToken) {
+    log("⏭️  Telegram: no configurado (TELEGRAM_BOT_TOKEN faltante)");
+    return null;
+  }
+
+  const channelId = TELEGRAM_CONFIG.channelId;
+  if (!channelId) {
+    log("⏭️  Telegram: no configurado (TELEGRAM_CHANNEL_ID faltante)");
+    return null;
+  }
+
+  try {
+    const boundary = `----TelegramBoundary${Date.now()}`;
+
+    // Build multipart body: chat_id + caption + parse_mode + photo
+    let bodyParts = "";
+    // chat_id
+    bodyParts += `--${boundary}\r\n`;
+    bodyParts += `Content-Disposition: form-data; name="chat_id"\r\n\r\n`;
+    bodyParts += `${channelId}\r\n`;
+    // caption
+    bodyParts += `--${boundary}\r\n`;
+    bodyParts += `Content-Disposition: form-data; name="caption"\r\n\r\n`;
+    bodyParts += `${message}\r\n`;
+    // parse_mode (HTML for bold/links)
+    bodyParts += `--${boundary}\r\n`;
+    bodyParts += `Content-Disposition: form-data; name="parse_mode"\r\n\r\n`;
+    bodyParts += `HTML\r\n`;
+    // photo file
+    bodyParts += `--${boundary}\r\n`;
+    bodyParts += `Content-Disposition: form-data; name="photo"; filename="ballbot-hit.png"\r\n`;
+    bodyParts += `Content-Type: image/png\r\n\r\n`;
+
+    const bodyEnd = `\r\n--${boundary}--\r\n`;
+    const bodyStart = Buffer.from(bodyParts, "utf-8");
+    const bodyClose = Buffer.from(bodyEnd, "utf-8");
+    const multipartBody = Buffer.concat([bodyStart, imageBuffer, bodyClose]);
+
+    const result = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: "api.telegram.org",
+        path: `/bot${TELEGRAM_CONFIG.botToken}/sendPhoto`,
+        method: "POST",
+        headers: {
+          "Content-Type": `multipart/form-data; boundary=${boundary}`,
+          "Content-Length": multipartBody.length,
+        },
+      }, (res) => {
+        let data = "";
+        res.on("data", (chunk) => (data += chunk));
+        res.on("end", () => {
+          const parsed = JSON.parse(data);
+          if (res.statusCode >= 200 && res.statusCode < 300 && parsed.ok) {
+            resolve(parsed);
+          } else {
+            reject(new Error(`Telegram API ${res.statusCode}: ${parsed.description || data}`));
+          }
+        });
+      });
+      req.on("error", reject);
+      req.setTimeout(30000, () => { req.destroy(); reject(new Error("Telegram API timeout (30s)")); });
+      req.write(multipartBody);
+      req.end();
+    });
+
+    const msgId = result.result?.message_id;
+    log(`✅ Telegram publicado: channel=${channelId} message_id=${msgId}`);
+    return result;
+  } catch (e) {
+    log(`❌ Telegram error: ${e.message}`);
+    return null;
+  }
+}
+
 // ─── Build Social Media Caption ──────────────────────────────────────────────
 function buildCaption(drawInfo, extractedNumbers) {
   const p3 = extractedNumbers?.p3 || "???";
@@ -442,6 +531,27 @@ function buildCaption(drawInfo, extractedNumbers) {
   ].join("\n");
 }
 
+/**
+ * Builds an HTML-formatted caption for Telegram.
+ * Telegram photo captions support HTML: <b>, <i>, <a>, <code>.
+ */
+function buildTelegramCaption(drawInfo, extractedNumbers) {
+  const p3 = extractedNumbers?.p3 || "???";
+  const p4 = extractedNumbers?.p4 || "????";
+  const periodLabel = drawInfo.emoji === "☀️" ? "Mediodía" : "Noche";
+
+  return [
+    `${drawInfo.emoji} <b>RESULTADOS OFICIALES</b> — Pick ${periodLabel}`,
+    ``,
+    `🎯 Pick 3: <b>${p3}</b>`,
+    `🎯 Pick 4: <b>${p4}</b>`,
+    ``,
+    `✅ Verificado por <b>Ballbot</b>`,
+    ``,
+    `📲 <a href="${META_CONFIG.ctaUrl}">Estrategias en tiempo real</a>`,
+  ].join("\n");
+}
+
 // ─── Main Entry Point ────────────────────────────────────────────────────────
 /**
  * Publishes lottery results to all configured social media channels.
@@ -455,10 +565,11 @@ function buildCaption(drawInfo, extractedNumbers) {
  */
 async function publishToSocial({ drawInfo, extractedNumbers, videoTitle }) {
   const hasMetaConfig = META_CONFIG.pageAccessToken && (META_CONFIG.pageId || META_CONFIG.igUserId || META_CONFIG.groupId);
+  const hasTelegramConfig = !!TELEGRAM_CONFIG.botToken;
 
-  if (!hasMetaConfig) {
+  if (!hasMetaConfig && !hasTelegramConfig) {
     log("⏭️  Social publisher: ninguna plataforma configurada — saltando");
-    return { facebook: null, instagram: null, group: null };
+    return { facebook: null, instagram: null, group: null, telegram: null };
   }
 
   const p3 = extractedNumbers?.p3 || null;
@@ -466,7 +577,7 @@ async function publishToSocial({ drawInfo, extractedNumbers, videoTitle }) {
 
   if (!p3 && !p4) {
     log("⏭️  Social publisher: sin números extraídos — saltando");
-    return { facebook: null, instagram: null, group: null };
+    return { facebook: null, instagram: null, group: null, telegram: null };
   }
 
   log(`📣 Social publisher: iniciando publicación para ${drawInfo.type}...`);
@@ -483,7 +594,7 @@ async function publishToSocial({ drawInfo, extractedNumbers, videoTitle }) {
     });
   } catch (e) {
     log(`❌ Image generation failed: ${e.message}`);
-    return { facebook: null, instagram: null, group: null };
+    return { facebook: null, instagram: null, group: null, telegram: null };
   }
 
   // Save image to disk (audit trail + debugging)
@@ -491,24 +602,28 @@ async function publishToSocial({ drawInfo, extractedNumbers, videoTitle }) {
     await saveImageToDisk(imageBuffer, drawInfo);
   } catch (_) {}
 
-  // ── Step 2: Build caption ──
-  const caption = buildCaption(drawInfo, extractedNumbers);
+  // ── Step 2: Build captions (different formats per platform) ──
+  const metaCaption = buildCaption(drawInfo, extractedNumbers);
+  const telegramCaption = buildTelegramCaption(drawInfo, extractedNumbers);
 
   // ── Step 3: Publish to all platforms in parallel ──
-  const [facebook, instagram, group] = await Promise.allSettled([
-    postToFacebookPage(imageBuffer, caption),
-    postToInstagram(imageBuffer, caption),
-    postToFacebookGroup(imageBuffer, caption),
+  const [facebook, instagram, group, telegram] = await Promise.allSettled([
+    postToFacebookPage(imageBuffer, metaCaption),
+    postToInstagram(imageBuffer, metaCaption),
+    postToFacebookGroup(imageBuffer, metaCaption),
+    postToTelegram(imageBuffer, telegramCaption),
   ]);
 
   const results = {
     facebook: facebook.status === "fulfilled" ? facebook.value : null,
     instagram: instagram.status === "fulfilled" ? instagram.value : null,
     group: group.status === "fulfilled" ? group.value : null,
+    telegram: telegram.status === "fulfilled" ? telegram.value : null,
   };
 
+  const total = Object.keys(results).length;
   const published = Object.values(results).filter(Boolean).length;
-  log(`📣 Social publisher: ${published}/3 plataformas publicadas exitosamente`);
+  log(`📣 Social publisher: ${published}/${total} plataformas publicadas exitosamente`);
 
   return results;
 }
@@ -518,4 +633,5 @@ module.exports = {
   publishToSocial,
   generateHitImage,
   saveImageToDisk,
+  postToTelegram,
 };
