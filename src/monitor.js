@@ -270,10 +270,7 @@ async function notifyBallbot(draw, video) {
     return;
   }
 
-  const webhooks = CONFIG.webhook_url.split(",").map(u => u.trim()).filter(Boolean);
-  const drawDate = formatDrawDate(video.title);
-
-  // ── Step 1: AI Video Analysis ─────────────────────────────────────────
+  // ── Step 1: AI Video Analysis (BLOCKING — we need the numbers) ────────
   let extractedNumbers = null;
   try {
     log(`🧠 Initiating AI video analysis for ${video.id}...`);
@@ -281,45 +278,56 @@ async function notifyBallbot(draw, video) {
     log(`🎯 AI extraction complete: P3=${extractedNumbers.p3 || "N/A"} P4=${extractedNumbers.p4 || "N/A"} [${extractedNumbers.confidence.toUpperCase()}]`);
   } catch (e) {
     log(`❌ Video analysis failed: ${e.message}`);
-    log(`⚠️  Cannot proceed with identical Postgres mapping without numbers.`);
     return;
   }
 
-  // ── Step 2: Prepare specific payloads for P3 and P4 ──────────────────
+  // ── Step 2: Webhook dispatch (FIRE-AND-FORGET — never blocks pipeline) ─
+  // Email, Telegram and Social fire immediately after this function returns.
+  // Webhook failures/retries run in the background and cannot delay delivery.
+  _dispatchWebhooks(draw, video, extractedNumbers).catch(e =>
+    log(`⚠️ Webhook dispatch background error: ${e.message}`)
+  );
+
+  return extractedNumbers;
+}
+
+/**
+ * Background webhook dispatcher — runs fully async, never blocks the main pipeline.
+ * A dead or slow endpoint only affects its own retry cycle, not email/Telegram.
+ */
+async function _dispatchWebhooks(draw, video, extractedNumbers) {
+  const webhooks = CONFIG.webhook_url.split(",").map(u => u.trim()).filter(Boolean);
+  const drawDate = formatDrawDate(video.title);
+
   const gamesToNotify = [];
   if (extractedNumbers.p3) {
     gamesToNotify.push({
-      date: drawDate,
-      game: "p3",
-      period: draw.period,
+      date: drawDate, game: "p3", period: draw.period,
       numbers: formatNumbers(extractedNumbers.p3),
       secret: CONFIG.webhook_secret || "",
     });
   }
   if (extractedNumbers.p4) {
     gamesToNotify.push({
-      date: drawDate,
-      game: "p4",
-      period: draw.period,
+      date: drawDate, game: "p4", period: draw.period,
       numbers: formatNumbers(extractedNumbers.p4),
       secret: CONFIG.webhook_secret || "",
     });
   }
 
-  // ── Step 3: Send separate calls (Relentless Retry) ───────────────────
+  const maxRetries = 3;
+  const retryDelay = 10000;
+
   for (const payloadItem of gamesToNotify) {
     const payload = JSON.stringify(payloadItem);
-    const maxRetries = 3;
-    const retryDelay = 10000;
-
     for (const targetUrl of webhooks) {
       let success = false;
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-          log(`📡 Sending [${payloadItem.game.toUpperCase()}] to webhook: ${targetUrl}...`);
+          log(`📡 [bg] Sending [${payloadItem.game.toUpperCase()}] → ${targetUrl}...`);
           const raw = await httpPost(targetUrl, payload);
           const response = JSON.parse(raw);
-          log(`✅ Ballbot notificado [${payloadItem.game.toUpperCase()}] en ${targetUrl}: ${response.message || "OK"}`);
+          log(`✅ Webhook [${payloadItem.game.toUpperCase()}] @ ${targetUrl}: ${response.message || "OK"}`);
           success = true;
           break;
         } catch (e) {
@@ -327,16 +335,9 @@ async function notifyBallbot(draw, video) {
           if (attempt < maxRetries) await sleep(retryDelay);
         }
       }
-      if (!success) {
-        log(`⚠️ Could not notify ${targetUrl} after ${maxRetries} attempts.`);
-      }
+      if (!success) log(`⚠️ Webhook ${targetUrl} unreachable after ${maxRetries} attempts.`);
     }
   }
-
-  // Cleanup is now managed by VideoAnalyzer's periodic rotation (last 14)
-  // to avoid deleting the goldFrame before the email is sent.
-  
-  return extractedNumbers; 
 }
 
 // ─── Frame Capture with yt-dlp + ffmpeg ────────────────────────────────────
