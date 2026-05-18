@@ -217,18 +217,53 @@ async function generateHitImage({ p3, p4, type, emoji, date }) {
       Descubre el patrón de mañana → app.ballbot.tel
     </text>
 
-    <!-- ══ FOOTER COPYRIGHT ══ -->
+    <!-- ══ FOOTER COPYRIGHT (brand-facing) ══ -->
     <text x="540" y="930" text-anchor="middle"
           font-family="'Segoe UI','Roboto',Arial,sans-serif"
           font-size="20" font-weight="600" letter-spacing="3"
-          fill="#3A5070">
-      © 2026 BALLBOT SYSTEMS
+          fill="#5A8AAA">
+      © 2026 BallBot · app.ballbot.tel
     </text>
+
+    <!-- ══ DIAGONAL WATERMARK (machine-readable layer, opacity minimal) ══ -->
+    <g transform="translate(540, 540) rotate(-35)" opacity="0.02">
+      <text x="0" y="-120" text-anchor="middle"
+            font-family="'Segoe UI','Roboto',Arial,sans-serif"
+            font-size="52" font-weight="900" letter-spacing="4"
+            fill="#FFFFFF">
+        BLISS SYSTEMS LLC
+      </text>
+      <text x="0" y="0" text-anchor="middle"
+            font-family="'Segoe UI','Roboto',Arial,sans-serif"
+            font-size="40" font-weight="700" letter-spacing="6"
+            fill="#FFFFFF">
+        app.ballbot.tel
+      </text>
+      <text x="0" y="120" text-anchor="middle"
+            font-family="'Segoe UI','Roboto',Arial,sans-serif"
+            font-size="52" font-weight="900" letter-spacing="4"
+            fill="#FFFFFF">
+        BLISS SYSTEMS LLC
+      </text>
+    </g>
 
   </g>
 </svg>`.trim();
 
-  const pngBuffer = await sharp(Buffer.from(svg)).png({ quality: 95 }).toBuffer();
+  // ── Level 3: EXIF/PNG metadata injection (legal authorship chain) ──
+  const pngBuffer = await sharp(Buffer.from(svg))
+    .png({ quality: 95 })
+    .withMetadata({
+      exif: {
+        IFD0: {
+          Copyright:    '© 2026 Bliss Systems LLC. All rights reserved.',
+          Artist:       'Bliss Systems LLC',
+          ImageDescription: 'BallBot HIT — Official Lottery Results · app.ballbot.tel',
+          Software:     'BallBot Social Publisher v4.0 — Bliss Systems LLC',
+        }
+      }
+    })
+    .toBuffer();
   log(`🖼️  Imagen generada: ${SIZE}x${SIZE} PNG (${(pngBuffer.length / 1024).toFixed(0)} KB)`);
   return pngBuffer;
 }
