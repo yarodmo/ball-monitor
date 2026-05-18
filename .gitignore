@@ -6,3 +6,5 @@ logs/
 config/state.json
 test-sniper.js
 src/test-real-send.js
+src/test-verification.js
+test-social.js
