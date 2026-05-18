@@ -10,13 +10,12 @@
  *   to "Pick Midday 20260323" / "Pick Evening 20260323" (CURRENT)
  */
 
-const { exec } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
 const http = require("http");
 const url = require("url");
-const { analyzeVideo, cleanupAnalysis } = require("./video-analyzer");
+const { analyzeVideo } = require("./video-analyzer");
 const { publishToSocial } = require("./social-publisher");
 
 // ─── Environment & Config ──────────────────────────────────────────────────
@@ -340,81 +339,9 @@ async function _dispatchWebhooks(draw, video, extractedNumbers) {
   }
 }
 
-// ─── Frame Capture with yt-dlp + ffmpeg ────────────────────────────────────
-const CAPTURE_DIR = path.join(__dirname, "../captures");
-if (!fs.existsSync(CAPTURE_DIR)) fs.mkdirSync(CAPTURE_DIR, { recursive: true });
-
-function captureFrame(videoUrl, videoId) {
-  return new Promise((resolve, reject) => {
-    const outputPath = path.join(CAPTURE_DIR, `${videoId}_frame.jpg`);
-    const thumbnailPath = path.join(CAPTURE_DIR, `${videoId}_thumb.jpg`);
-
-    // Strategy 1: Use yt-dlp to get the best thumbnail (fast, always available)
-    const thumbCmd = `yt-dlp --write-thumbnail --skip-download --convert-thumbnails jpg -o "${path.join(CAPTURE_DIR, videoId)}" "${videoUrl}" 2>&1`;
-
-    log(`📸 Capturing frame for ${videoId}...`);
-
-    exec(thumbCmd, { timeout: 60000 }, (_err, _stdout) => {
-      // Check if thumbnail was saved with various possible extensions
-      const possibleFiles = [`${videoId}.jpg`, `${videoId}.webp`, `${videoId}.png`].map((f) =>
-        path.join(CAPTURE_DIR, f)
-      );
-
-      const existingThumb = possibleFiles.find((f) => fs.existsSync(f));
-
-      if (existingThumb) {
-        if (existingThumb !== thumbnailPath) {
-          fs.renameSync(existingThumb, thumbnailPath);
-        }
-        log(`✅ Thumbnail captured: ${thumbnailPath}`);
-        return resolve(thumbnailPath);
-      }
-
-      // Strategy 2: Try to grab a mid-video frame with ffmpeg
-      log(`⚠️  Thumbnail not found, trying ffmpeg frame extraction...`);
-      const ffmpegCmd = `yt-dlp -g "${videoUrl}" 2>/dev/null | head -1`;
-
-      exec(ffmpegCmd, { timeout: 30000 }, (err2, streamUrl) => {
-        if (err2 || !streamUrl.trim()) {
-          return reject(new Error("Could not get stream URL"));
-        }
-
-        const ffmpeg = `ffmpeg -i "${streamUrl.trim()}" -ss 00:00:03 -vframes 1 -q:v 2 "${outputPath}" -y 2>&1`;
-        exec(ffmpeg, { timeout: 60000 }, (err3) => {
-          if (err3 || !fs.existsSync(outputPath)) {
-            return reject(new Error("Frame extraction failed"));
-          }
-          log(`✅ Frame captured via ffmpeg: ${outputPath}`);
-          resolve(outputPath);
-        });
-      });
-    });
-  });
-}
-
-// ─── Captures Cleanup (7-day rotation) ─────────────────────────────────────
-function cleanOldCaptures() {
-  try {
-    const now = Date.now();
-    const maxAge = 7 * 24 * 60 * 60 * 1000; // 7 days
-    const files = fs.readdirSync(CAPTURE_DIR);
-    let removed = 0;
-    for (const file of files) {
-      const fp = path.join(CAPTURE_DIR, file);
-      const stat = fs.statSync(fp);
-      if (now - stat.mtimeMs > maxAge) {
-        fs.unlinkSync(fp);
-        removed++;
-      }
-    }
-    if (removed > 0) log(`🧹 Cleanup: ${removed} capturas antiguas eliminadas`);
-  } catch (e) {
-    log(`⚠️  Cleanup error: ${e.message}`);
-  }
-}
 
 // ─── Email via Nodemailer ───────────────────────────────────────────────────
-async function sendEmail(drawInfo, videoUrl, videoTitle, extractedNumbers) {
+async function sendEmail(drawInfo, extractedNumbers) {
   const nodemailer = require("nodemailer");
 
   const transporter = nodemailer.createTransport({
@@ -595,7 +522,6 @@ async function pollChannel() {
 
     log(`📋 Found ${videos.length} videos in feed`);
     const state = loadState();
-    let foundAnyNew = false;
 
     for (const video of videos) {
       if (state.processedVideos.includes(video.id)) continue;
@@ -632,7 +558,7 @@ async function pollChannel() {
         // ── Step 2: Send email notification ──
         try {
           if (CONFIG.smtp && CONFIG.smtp.user && CONFIG.smtp.user !== "TU_EMAIL@gmail.com") {
-            await sendEmail(draw, video.url, video.title, extractedNumbers);
+            await sendEmail(draw, extractedNumbers);
           }
         } catch (e) {
           log(`❌ Email failed: ${e.message}`);
@@ -765,15 +691,9 @@ if (require.main === module) {
 
     startStatusServer();
 
-    // Cleanup old captures once at start
-    cleanOldCaptures();
-
     // Run immediately on start, then use smart scheduler
     await pollChannel();
     schedulePoll();
-
-    // Daily cleanup at midnight
-    setInterval(cleanOldCaptures, 24 * 60 * 60 * 1000);
   })();
 }
 module.exports = { fetchLatestVideosViaScrape };
