@@ -323,6 +323,8 @@ async function analyzeVideo(videoUrl, videoId, videoTitle) {
     throw new Error(`Audio transcription failed: ${e.message}`);
   });
 
+  try { fs.unlinkSync(audioPath); } catch (_) {}
+
   log(`  🏆 FINAL: P3=${result.p3 || "?"} P4=${result.p4 || "?"} [AUDIO_ONLY_V5]`);
 
   cleanupOldAnalyses();
