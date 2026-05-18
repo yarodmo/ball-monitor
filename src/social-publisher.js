@@ -42,7 +42,7 @@ function log(msg) {
   const logFile = path.join(__dirname, "../logs/monitor.log");
   try {
     fs.appendFileSync(logFile, line + "\n");
-  } catch (_) {}
+  } catch (_) { }
 }
 
 // ─── SVG Template → PNG Image Generation ─────────────────────────────────────
@@ -90,61 +90,141 @@ async function generateHitImage({ p3, p4, type, emoji, date }) {
   const svg = `
 <svg width="${SIZE}" height="${SIZE}" viewBox="0 0 ${SIZE} ${SIZE}" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="headerGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#0f172a"/>
-      <stop offset="100%" style="stop-color:#1e293b"/>
+    <!-- Background base gradient: deep navy -->
+    <radialGradient id="bgGlow" cx="50%" cy="50%" r="70%">
+      <stop offset="0%" style="stop-color:#14244B;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#080E21;stop-opacity:1"/>
+    </radialGradient>
+
+    <!-- Geometric Grid Pattern -->
+    <pattern id="grid" width="50" height="50" patternUnits="userSpaceOnUse">
+      <path d="M 50 0 L 0 0 0 50" fill="none" stroke="#FFFFFF" stroke-width="1" opacity="0.04"/>
+    </pattern>
+
+    <!-- Frosted glass card gradient -->
+    <linearGradient id="cardGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ffffff;stop-opacity:0.12"/>
+      <stop offset="100%" style="stop-color:#ffffff;stop-opacity:0.02"/>
     </linearGradient>
+
+    <!-- CTA pill gradient: golden -->
+    <linearGradient id="ctaGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#F9A826"/>
+      <stop offset="100%" style="stop-color:#FFD700"/>
+    </linearGradient>
+
+    <!-- Golden glow for numbers -->
+    <filter id="goldGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <!-- Soft drop shadow for cards -->
+    <filter id="softShadow" x="-15%" y="-15%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="12" stdDeviation="20" flood-color="#000000" flood-opacity="0.6"/>
+    </filter>
+
     <clipPath id="rounded">
       <rect width="${SIZE}" height="${SIZE}" rx="32"/>
     </clipPath>
   </defs>
 
   <g clip-path="url(#rounded)">
-    <!-- Background -->
-    <rect width="${SIZE}" height="${SIZE}" fill="#050505"/>
 
-    <!-- Header -->
-    <rect y="0" width="${SIZE}" height="240" fill="url(#headerGrad)"/>
-    <line x1="0" y1="238" x2="${SIZE}" y2="238" stroke="#ffd700" stroke-width="4"/>
+    <!-- ══ BACKGROUND ══ -->
+    <!-- Deep Navy Base -->
+    <rect width="${SIZE}" height="${SIZE}" fill="url(#bgGlow)"/>
+    <!-- Soft background glow only (grid removed for cleaner cognitive flow) -->
 
-    <!-- Emoji + BALLBOT HIT -->
-    <text x="540" y="120" text-anchor="middle" font-family="'Segoe UI','Roboto',sans-serif" font-size="72" font-weight="bold" fill="#ffd700" letter-spacing="4">
-      <tspan>${emojiChar}</tspan>
-      <tspan dx="16">BALLBOT HIT</tspan>
+    <!-- ══ HEADER BAR ══ -->
+    <!-- Accent line at top instead of full bar -->
+    <line x1="0" y1="180" x2="${SIZE}" y2="180" stroke="#00E5FF" stroke-width="1" opacity="0.3"/>
+
+    <!-- Brand: Pure Typography (No Icon) - APEX Bold -->
+    <text x="540" y="90" text-anchor="middle"
+          font-family="'Segoe UI','Roboto',Arial,sans-serif"
+          font-size="56" font-weight="900" letter-spacing="8">
+      <tspan fill="#FFFFFF">BALLBOT </tspan>
+      <tspan fill="#FFD700">HIT</tspan>
     </text>
 
-    <!-- Draw Type -->
-    <text x="540" y="190" text-anchor="middle" font-family="'Segoe UI','Roboto',sans-serif" font-size="36" fill="#94a3b8" font-weight="600" text-transform="uppercase">${type.toUpperCase()} OFICIAL</text>
-
-    <!-- Pick 3 Box -->
-    <rect x="100" y="310" width="400" height="280" rx="24" fill="#111111" stroke="#333333" stroke-width="2"/>
-    <text x="300" y="380" text-anchor="middle" font-family="'Segoe UI','Roboto',sans-serif" font-size="28" fill="#64748b" letter-spacing="4">PICK 3</text>
-    <text x="300" y="510" text-anchor="middle" font-family="'Segoe UI','Roboto',sans-serif" font-size="120" font-weight="bold" fill="#ffd700">${p3Str}</text>
-
-    <!-- Pick 4 Box -->
-    <rect x="580" y="310" width="400" height="280" rx="24" fill="#111111" stroke="#333333" stroke-width="2"/>
-    <text x="780" y="380" text-anchor="middle" font-family="'Segoe UI','Roboto',sans-serif" font-size="28" fill="#64748b" letter-spacing="4">PICK 4</text>
-    <text x="780" y="510" text-anchor="middle" font-family="'Segoe UI','Roboto',sans-serif" font-size="120" font-weight="bold" fill="#ffd700">${p4Str}</text>
-
-    <!-- Audit Badge -->
-    <rect x="120" y="660" width="840" height="100" rx="16" fill="#0f172a"/>
-    <line x1="120" y1="660" x2="120" y2="760" stroke="#38bdf8" stroke-width="8"/>
-    <text x="540" y="720" text-anchor="middle" font-family="'Segoe UI','Roboto',sans-serif" font-size="24" fill="#94a3b8">
-      <tspan font-weight="bold">AUDITORÍA VERIFICADA:</tspan>
-      <tspan dx="8">Resultado verificado y sincronizado por Ballbot.</tspan>
+    <!-- Subtitle -->
+    <text x="540" y="145" text-anchor="middle"
+          font-family="'Segoe UI','Roboto',Arial,sans-serif"
+          font-size="24" font-weight="500" letter-spacing="6"
+          fill="#00E5FF" opacity="0.9">
+      ${type.toUpperCase()} — RESULTADOS OFICIALES
     </text>
 
-    <!-- Footer -->
-    <rect y="850" width="${SIZE}" height="230" fill="#000000"/>
+    <!-- ══ FROSTED GLASS DATA CARDS ══ -->
+    <!-- Card 1: Pick 3 -->
+    <rect x="90" y="240" width="410" height="320" rx="24"
+          fill="url(#cardGrad)" stroke="#FFFFFF" stroke-width="1" stroke-opacity="0.15"
+          filter="url(#softShadow)"/>
+    <text x="295" y="300" text-anchor="middle"
+          font-family="'Segoe UI','Roboto',Arial,sans-serif"
+          font-size="24" font-weight="600" letter-spacing="6"
+          fill="#A0C4FF">PICK 3</text>
+    <!-- Golden number (crisp) -->
+    <text x="295" y="470" text-anchor="middle"
+          font-family="'Segoe UI','Roboto',Arial,sans-serif"
+          font-size="140" font-weight="800"
+          fill="#FFD700">${p3Str}</text>
 
-    <!-- Date & Time -->
-    <text x="160" y="920" text-anchor="start" font-family="'Segoe UI','Roboto',sans-serif" font-size="28" fill="#475569">${dateStr} • ${timeNow} ET</text>
+    <!-- Card 2: Pick 4 -->
+    <rect x="580" y="240" width="410" height="320" rx="24"
+          fill="url(#cardGrad)" stroke="#FFFFFF" stroke-width="1" stroke-opacity="0.15"
+          filter="url(#softShadow)"/>
+    <text x="785" y="300" text-anchor="middle"
+          font-family="'Segoe UI','Roboto',Arial,sans-serif"
+          font-size="24" font-weight="600" letter-spacing="6"
+          fill="#A0C4FF">PICK 4</text>
+    <!-- Golden number (crisp) -->
+    <text x="785" y="470" text-anchor="middle"
+          font-family="'Segoe UI','Roboto',Arial,sans-serif"
+          font-size="120" font-weight="800"
+          fill="#FFD700">${p4Str}</text>
 
-    <!-- CTA -->
-    <text x="540" y="1000" text-anchor="middle" font-family="'Segoe UI','Roboto',sans-serif" font-size="30" fill="#38bdf8" font-weight="600">Estrategias en tiempo real → app.ballbot.tel</text>
+    <!-- ══ VERIFICATION STRIP ══ -->
+    <!-- Institutional verification without the black error box -->
+    <g transform="translate(540, 633)">
+      <circle cx="-230" cy="-2" r="14" fill="#2E7D52" />
+      <path d="M -235 -2 L -232 1 L -225 -6" fill="none" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="-205" y="5" text-anchor="start"
+            font-family="'Segoe UI','Roboto',Arial,sans-serif"
+            font-size="22" font-weight="400" font-style="italic" letter-spacing="1"
+            fill="#B0C4DE">
+        Verificado por IA · Sincronizado en tiempo real
+      </text>
+    </g>
 
-    <!-- Copyright -->
-    <text x="540" y="1050" text-anchor="middle" font-family="'Segoe UI','Roboto',sans-serif" font-size="22" fill="#333333">© 2026 BallBot</text>
+    <!-- ══ DATE ══ -->
+    <text x="540" y="720" text-anchor="middle"
+          font-family="'Segoe UI','Roboto',Arial,sans-serif"
+          font-size="26" font-weight="400" fill="#FFFFFF" opacity="0.9">
+      ${dateStr} · ${timeNow} ET
+    </text>
+
+    <!-- ══ CTA PILL BUTTON ══ -->
+    <!-- Pill background in vivid golden gradient -->
+    <rect x="115" y="770" width="850" height="90" rx="45"
+          fill="url(#ctaGrad)" filter="url(#softShadow)"/>
+    <!-- CTA text: dark charcoal on gold — maximum legibility -->
+    <text x="540" y="827" text-anchor="middle"
+          font-family="'Segoe UI','Roboto',Arial,sans-serif"
+          font-size="32" font-weight="800" letter-spacing="1"
+          fill="#0D1B3E">
+      Descubre el patrón de mañana → app.ballbot.tel
+    </text>
+
+    <!-- ══ FOOTER COPYRIGHT ══ -->
+    <text x="540" y="930" text-anchor="middle"
+          font-family="'Segoe UI','Roboto',Arial,sans-serif"
+          font-size="20" font-weight="600" letter-spacing="3"
+          fill="#3A5070">
+      © 2026 BALLBOT SYSTEMS
+    </text>
+
   </g>
 </svg>`.trim();
 
@@ -600,7 +680,7 @@ async function publishToSocial({ drawInfo, extractedNumbers, videoTitle }) {
   // Save image to disk (audit trail + debugging)
   try {
     await saveImageToDisk(imageBuffer, drawInfo);
-  } catch (_) {}
+  } catch (_) { }
 
   // ── Step 2: Build captions (different formats per platform) ──
   const metaCaption = buildCaption(drawInfo, extractedNumbers);
