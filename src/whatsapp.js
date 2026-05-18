@@ -7,8 +7,6 @@
  * Setup inicial: ejecutar `node tools/whatsapp-setup.js` desde el VPS,
  * escanear el QR con el número admin (1 sola vez). La sesión persiste en
  * ../auth-state/baileys/.
- *
- * Interfaz: postToWhatsApp(imageBuffer, caption) — espejo de postToTelegram().
  */
 
 const fs = require("fs");
@@ -17,8 +15,8 @@ const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers
 const P = require("pino");
 
 const AUTH_DIR = path.join(__dirname, "../auth-state/baileys");
+const CONNECT_TIMEOUT_MS = 180000; // 3 minutos (tiempo holgado para QR scan + restart)
 
-// ─── Logger ──────────────────────────────────────────────────────────────────
 function log(msg) {
   const ts = new Date().toISOString();
   const line = `[${ts}] [whatsapp] ${msg}`;
@@ -29,10 +27,8 @@ function log(msg) {
   } catch (_) { }
 }
 
-// Silenciar el logger interno de Baileys (muy ruidoso)
 const BAILEYS_LOGGER = P({ level: "silent" });
 
-// ─── Singleton de conexión ───────────────────────────────────────────────────
 let sock = null;
 let connectionReady = false;
 let connectingPromise = null;
@@ -41,11 +37,41 @@ async function getSocket({ printQR = false } = {}) {
   if (sock && connectionReady) return sock;
   if (connectingPromise) return connectingPromise;
 
-  connectingPromise = (async () => {
-    if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
+  connectingPromise = connectInternal({ printQR });
 
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  try {
+    const result = await connectingPromise;
+    return result;
+  } catch (e) {
+    connectingPromise = null;
+    throw e;
+  }
+}
 
+async function connectInternal({ printQR }) {
+  if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+
+  let resolveFn, rejectFn;
+  const promise = new Promise((res, rej) => { resolveFn = res; rejectFn = rej; });
+  let settled = false;
+
+  const overallTimeout = setTimeout(() => {
+    if (!settled) {
+      settled = true;
+      rejectFn(new Error(`WhatsApp connection timeout (${CONNECT_TIMEOUT_MS / 1000}s) — sesión no autenticada?`));
+    }
+  }, CONNECT_TIMEOUT_MS);
+
+  const finish = (result, error) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(overallTimeout);
+    if (error) rejectFn(error);
+    else resolveFn(result);
+  };
+
+  const attemptConnect = () => {
     sock = makeWASocket({
       auth: state,
       logger: BAILEYS_LOGGER,
@@ -55,51 +81,54 @@ async function getSocket({ printQR = false } = {}) {
 
     sock.ev.on("creds.update", saveCreds);
 
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error("WhatsApp connection timeout (60s) — sesión no autenticada?"));
-      }, 60000);
+    sock.ev.on("connection.update", (update) => {
+      const { connection, lastDisconnect, qr } = update;
 
-      sock.ev.on("connection.update", (update) => {
-        const { connection, lastDisconnect, qr } = update;
+      if (qr && printQR) {
+        const qrcode = require("qrcode-terminal");
+        log("📱 Escanea este QR con el WhatsApp del número admin:");
+        qrcode.generate(qr, { small: true });
+      }
 
-        if (qr && printQR) {
-          const qrcode = require("qrcode-terminal");
-          log("📱 Escanea este QR con el WhatsApp del número admin:");
-          qrcode.generate(qr, { small: true });
-        }
+      if (connection === "open") {
+        connectionReady = true;
+        log(`✅ WhatsApp conectado (${sock.user?.id || "?"})`);
+        finish(sock);
+        return;
+      }
 
-        if (connection === "open") {
-          clearTimeout(timeout);
-          connectionReady = true;
-          log(`✅ WhatsApp conectado (${sock.user?.id || "?"})`);
-          resolve(sock);
-        }
+      if (connection === "close") {
+        connectionReady = false;
+        const code = lastDisconnect?.error?.output?.statusCode;
 
-        if (connection === "close") {
-          connectionReady = false;
-          const code = lastDisconnect?.error?.output?.statusCode;
-          const shouldReconnect = code !== DisconnectReason.loggedOut;
-          log(`⚠️  WhatsApp desconectado (code=${code}) — ${shouldReconnect ? "reconectando..." : "logged out, requiere re-QR"}`);
+        if (code === DisconnectReason.restartRequired) {
+          log(`🔄 Restart required (code=515) — reiniciando socket automáticamente...`);
           sock = null;
-          connectingPromise = null;
-          if (!shouldReconnect) {
-            clearTimeout(timeout);
-            reject(new Error("WhatsApp logged out — corre tools/whatsapp-setup.js"));
-          }
+          setTimeout(attemptConnect, 1500);
+          return;
         }
-      });
-    });
-  })();
 
-  try {
-    return await connectingPromise;
-  } finally {
-    connectingPromise = null;
-  }
+        if (code === DisconnectReason.loggedOut) {
+          log(`❌ Logged out (code=401) — borra auth-state/baileys/ y vuelve a escanear el QR`);
+          sock = null;
+          finish(null, new Error("WhatsApp logged out — re-auth requerido"));
+          return;
+        }
+
+        // Cualquier otro disconnect: reintentar con backoff suave
+        log(`⚠️  Desconectado (code=${code}) — reintentando en 3s...`);
+        sock = null;
+        if (!settled) {
+          setTimeout(attemptConnect, 3000);
+        }
+      }
+    });
+  };
+
+  attemptConnect();
+  return promise;
 }
 
-// ─── API pública ─────────────────────────────────────────────────────────────
 async function postToWhatsApp(imageBuffer, caption) {
   const groupId = process.env.WHATSAPP_GROUP_ID;
   if (!groupId) {
