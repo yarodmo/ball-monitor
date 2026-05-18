@@ -34,6 +34,8 @@ const TELEGRAM_CONFIG = {
   channelId: process.env.TELEGRAM_CHANNEL_ID || "@BallBotme",
 };
 
+const { postToWhatsApp } = require("./whatsapp");
+
 // ─── Logger (reuse monitor's pattern) ────────────────────────────────────────
 function log(msg) {
   const ts = new Date().toISOString();
@@ -667,6 +669,28 @@ function buildTelegramCaption(drawInfo, extractedNumbers) {
   ].join("\n");
 }
 
+/**
+ * Builds a WhatsApp-formatted caption.
+ * WhatsApp markdown: *bold*, _italic_, ~strike~, ```mono```. URLs auto-detectados.
+ */
+function buildWhatsAppCaption(drawInfo, extractedNumbers) {
+  const p3 = extractedNumbers?.p3 || "???";
+  const p4 = extractedNumbers?.p4 || "????";
+  const periodLabel = drawInfo.emoji === "☀️" ? "Mediodía" : "Noche";
+
+  return [
+    `${drawInfo.emoji} *RESULTADOS OFICIALES* — Pick ${periodLabel}`,
+    ``,
+    `🎯 Pick 3: *${p3}*`,
+    `🎯 Pick 4: *${p4}*`,
+    ``,
+    `✅ Verificado por *Ballbot*`,
+    ``,
+    `📲 Estrategias en tiempo real:`,
+    META_CONFIG.ctaUrl,
+  ].join("\n");
+}
+
 // ─── Main Entry Point ────────────────────────────────────────────────────────
 /**
  * Publishes lottery results to all configured social media channels.
@@ -684,7 +708,7 @@ async function publishToSocial({ drawInfo, extractedNumbers, videoTitle }) {
 
   if (!hasMetaConfig && !hasTelegramConfig) {
     log("⏭️  Social publisher: ninguna plataforma configurada — saltando");
-    return { facebook: null, instagram: null, group: null, telegram: null };
+    return { facebook: null, instagram: null, group: null, telegram: null, whatsapp: null };
   }
 
   const p3 = extractedNumbers?.p3 || null;
@@ -692,7 +716,7 @@ async function publishToSocial({ drawInfo, extractedNumbers, videoTitle }) {
 
   if (!p3 && !p4) {
     log("⏭️  Social publisher: sin números extraídos — saltando");
-    return { facebook: null, instagram: null, group: null, telegram: null };
+    return { facebook: null, instagram: null, group: null, telegram: null, whatsapp: null };
   }
 
   log(`📣 Social publisher: iniciando publicación para ${drawInfo.type}...`);
@@ -709,7 +733,7 @@ async function publishToSocial({ drawInfo, extractedNumbers, videoTitle }) {
     });
   } catch (e) {
     log(`❌ Image generation failed: ${e.message}`);
-    return { facebook: null, instagram: null, group: null, telegram: null };
+    return { facebook: null, instagram: null, group: null, telegram: null, whatsapp: null };
   }
 
   // Save image to disk (audit trail + debugging)
@@ -720,13 +744,15 @@ async function publishToSocial({ drawInfo, extractedNumbers, videoTitle }) {
   // ── Step 2: Build captions (different formats per platform) ──
   const metaCaption = buildCaption(drawInfo, extractedNumbers);
   const telegramCaption = buildTelegramCaption(drawInfo, extractedNumbers);
+  const whatsappCaption = buildWhatsAppCaption(drawInfo, extractedNumbers);
 
   // ── Step 3: Publish to all platforms in parallel ──
-  const [facebook, instagram, group, telegram] = await Promise.allSettled([
+  const [facebook, instagram, group, telegram, whatsapp] = await Promise.allSettled([
     postToFacebookPage(imageBuffer, metaCaption),
     postToInstagram(imageBuffer, metaCaption),
     postToFacebookGroup(imageBuffer, metaCaption),
     postToTelegram(imageBuffer, telegramCaption),
+    postToWhatsApp(imageBuffer, whatsappCaption),
   ]);
 
   const results = {
@@ -734,6 +760,7 @@ async function publishToSocial({ drawInfo, extractedNumbers, videoTitle }) {
     instagram: instagram.status === "fulfilled" ? instagram.value : null,
     group: group.status === "fulfilled" ? group.value : null,
     telegram: telegram.status === "fulfilled" ? telegram.value : null,
+    whatsapp: whatsapp.status === "fulfilled" ? whatsapp.value : null,
   };
 
   const total = Object.keys(results).length;
