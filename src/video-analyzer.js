@@ -30,6 +30,11 @@ require("dotenv").config({ path: path.join(__dirname, "../.env") });
 const WORK_DIR = path.join(__dirname, "../captures/analysis");
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 const MAX_ANALYSES_TO_KEEP = 14;
+// Un draw video de FL Lottery (3-4 min) genera audio m4a ~900KB-1MB.
+// Si descargamos <400KB, YouTube todavía está encodeando el video.
+// Abortar antes de enviar a Gemini para evitar transcripción inútil
+// + falso positivo de "no se extrajeron números".
+const MIN_AUDIO_SIZE_BYTES = 400 * 1024;
 
 if (!fs.existsSync(WORK_DIR)) fs.mkdirSync(WORK_DIR, { recursive: true });
 
@@ -99,6 +104,14 @@ async function downloadAudio(videoUrl, videoId, folderPath) {
       if (fs.existsSync(audioPath)) {
         const stats = fs.statSync(audioPath);
         log(`✅ Audio downloaded: ${audioPath} (${(stats.size / 1024 / 1024).toFixed(1)} MB)`);
+
+        // INTEGRITY GATE: descartar audio truncado (YouTube todavía encodeando)
+        if (stats.size < MIN_AUDIO_SIZE_BYTES) {
+          log(`🚫 INTEGRITY GATE: audio truncado (${(stats.size / 1024).toFixed(0)} KB < ${MIN_AUDIO_SIZE_BYTES / 1024} KB) — YouTube todavía encodeando. Abortando para reintento en próximo ciclo.`);
+          try { fs.unlinkSync(audioPath); } catch (_) { }
+          throw new Error("Audio truncado — encoding incompleto en YouTube");
+        }
+
         return audioPath;
       }
     } catch (e) {

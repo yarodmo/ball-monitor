@@ -280,12 +280,16 @@ async function notifyBallbot(draw, video) {
     return;
   }
 
-  // ── Step 2: Webhook dispatch (FIRE-AND-FORGET — never blocks pipeline) ─
-  // Email, Telegram and Social fire immediately after this function returns.
-  // Webhook failures/retries run in the background and cannot delay delivery.
-  _dispatchWebhooks(draw, video, extractedNumbers).catch(e =>
-    log(`⚠️ Webhook dispatch background error: ${e.message}`)
-  );
+  // ── Step 2: Webhook dispatch — bloqueado si extracción incompleta ──
+  // Truth gate: no enviar datos parciales a Ballbot. Si falta P3 o P4,
+  // el caller verá extractionSuccess=false y reintentará en próximo ciclo.
+  if (extractedNumbers.p3 && extractedNumbers.p4) {
+    _dispatchWebhooks(draw, video, extractedNumbers).catch(e =>
+      log(`⚠️ Webhook dispatch background error: ${e.message}`)
+    );
+  } else {
+    log(`🚫 TRUTH GATE webhook: P3=${extractedNumbers.p3 || "?"} P4=${extractedNumbers.p4 || "?"} — no enviado a Ballbot.`);
+  }
 
   return extractedNumbers;
 }
@@ -555,24 +559,30 @@ async function pollChannel() {
           log(`❌ notifyBallbot error: ${e.message}`);
         }
 
-        // ── Step 2: Send email notification ──
-        try {
-          if (CONFIG.smtp && CONFIG.smtp.user && CONFIG.smtp.user !== "TU_EMAIL@gmail.com") {
-            await sendEmail(draw, extractedNumbers);
+        // ── TRUTH GATE: solo difundir cuando AMBOS números están extraídos ──
+        // Evita enviar "Pick Evening: ?? / ????" a email/social y contaminar la
+        // confianza de los suscriptores. Si falta uno o ambos, retry en el
+        // siguiente ciclo (kill-switch no se activa por extractionSuccess=false).
+        if (extractionSuccess) {
+          try {
+            if (CONFIG.smtp && CONFIG.smtp.user && CONFIG.smtp.user !== "TU_EMAIL@gmail.com") {
+              await sendEmail(draw, extractedNumbers);
+            }
+          } catch (e) {
+            log(`❌ Email failed: ${e.message}`);
           }
-        } catch (e) {
-          log(`❌ Email failed: ${e.message}`);
-        }
 
-        // ── Step 4: Publish to social media (same level as email & webhook) ──
-        try {
-          await publishToSocial({
-            drawInfo: draw,
-            extractedNumbers,
-            videoTitle: video.title,
-          });
-        } catch (e) {
-          log(`❌ Social publish failed: ${e.message}`);
+          try {
+            await publishToSocial({
+              drawInfo: draw,
+              extractedNumbers,
+              videoTitle: video.title,
+            });
+          } catch (e) {
+            log(`❌ Social publish failed: ${e.message}`);
+          }
+        } else {
+          log(`🚫 TRUTH GATE: extracción incompleta (P3=${extractedNumbers?.p3 || "?"} P4=${extractedNumbers?.p4 || "?"}) — bloqueando email/social/webhook. Reintento en próximo ciclo.`);
         }
       } else {
         log(`⚠️  No period mapped for "${draw.type}" — notifications skipped`);
