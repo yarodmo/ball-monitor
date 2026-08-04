@@ -16,7 +16,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } = require("@whiskeysockets/baileys");
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers, fetchLatestBaileysVersion } = require("@whiskeysockets/baileys");
 const P = require("pino");
 
 const AUTH_DIR = path.join(__dirname, "../auth-state/baileys");
@@ -68,6 +68,22 @@ async function connectInternal({ printQR }) {
   if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
+  // WhatsApp impone una versión MÍNIMA de cliente. Si la que manda Baileys se
+  // queda atrás, el handshake muere con code=405 ANTES de autenticar — no es
+  // sesión caducada y re-escanear el QR no arregla nada.
+  // Incidente 2026-07-29: WA cortó por versión, Baileys publicó rc14 para
+  // adaptarse y esta instalación (clavada en rc11) quedó rechazada 6 días en
+  // silencio. Resolver la versión en cada conexión hace que el próximo corte
+  // se auto-cure en vez de repetir el apagón.
+  let waVersion = null;
+  try {
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+    waVersion = version;
+    log(`📌 WA client version: ${version.join(".")}${isLatest ? " (latest)" : " (fallback de la librería)"}`);
+  } catch (e) {
+    log(`⚠️  No se pudo resolver WA version (${e.message}) — usando la de la librería`);
+  }
+
   let resolveFn, rejectFn;
   const promise = new Promise((res, rej) => { resolveFn = res; rejectFn = rej; });
   let settled = false;
@@ -88,12 +104,15 @@ async function connectInternal({ printQR }) {
   };
 
   const attemptConnect = () => {
-    sock = makeWASocket({
+    const sockConfig = {
       auth: state,
       logger: BAILEYS_LOGGER,
       browser: Browsers.appropriate("Ballbot Monitor"),
       printQRInTerminal: false,
-    });
+    };
+    // Solo si se resolvió: pasar version=undefined pisaría el default de la librería.
+    if (waVersion) sockConfig.version = waVersion;
+    sock = makeWASocket(sockConfig);
 
     sock.ev.on("creds.update", saveCreds);
 
